@@ -29,16 +29,17 @@ STATUS_CLOSED = "closed"
 
 
 @dataclass(frozen=True)
-class ConversationStart:
+class ConversationSettings:
     idle_seconds: int = 600
     close_after_seconds: int = 3600
 
 
 @dataclass(frozen=True)
 class ReplyRequest:
-    conversation: ConversationStart
-    customer_sequence: int
-    customer_text: str
+    """The Flow start input and the GenerateReplyStep input: messages to answer."""
+
+    settings: ConversationSettings
+    customer_messages: list[str]
 
 
 @dataclass
@@ -47,6 +48,7 @@ class TranscriptRecord:
     role: str
     text: str
     tool_calls: list[str] = field(default_factory=list)
+    recorded_at: str = ""
 
 
 @dataclass
@@ -159,9 +161,10 @@ def next_evicted_chunk_token(state: ConversationState) -> str:
 
 
 def transcript_writer_step_options(state: ConversationState | None) -> StepOptions:
-    """Options of a Step that appends one record: load "current" and the chunk it may evict.
+    """Options of the transcript writer: load "current" and the chunk it may evict.
 
-    One appended record archives at most one chunk and evicts at most one chunk.
+    One execution appends at most TRANSCRIPT_CHUNK_SIZE records, so it archives
+    at most one chunk and evicts at most one chunk.
     """
     loads: list[AttributeMapLoad] = [TRANSCRIPT_CHUNKS.load(CURRENT_CHUNK_TOKEN)]
     if state is not None:
@@ -171,24 +174,29 @@ def transcript_writer_step_options(state: ConversationState | None) -> StepOptio
     return StepOptions(execute_load_attribute_map_instances=tuple(loads))
 
 
-def append_record_to_transcript(
+def append_records_to_transcript(
     context: Context,
-    role: str,
-    text: str,
+    records: list[TranscriptRecord],
     summarizer: TranscriptSummarizer,
-    tool_calls: list[str] | None = None,
-) -> tuple[ConversationState, TranscriptRecord]:
-    """Append one record; archive a full chunk; evict the oldest beyond the window."""
+) -> ConversationState:
+    """Append records in order; archive a full chunk; evict the oldest beyond the window.
+
+    Each record's sequence is assigned here. At most TRANSCRIPT_CHUNK_SIZE records.
+    """
+    if len(records) > TRANSCRIPT_CHUNK_SIZE:
+        raise ValueError(f"at most {TRANSCRIPT_CHUNK_SIZE} records per append")
     state = CONVERSATION_STATE.get(context)
     current_chunk = TRANSCRIPT_CHUNKS.get(context, CURRENT_CHUNK_TOKEN)
-    record = TranscriptRecord(state.next_sequence, role, text, list(tool_calls or []))
-    current_chunk.records.append(record)
-    state.next_sequence += 1
-    if role == ROLE_CUSTOMER:
-        state.customer_message_count += 1
-    else:
-        state.assistant_reply_count += 1
-    if len(current_chunk.records) >= TRANSCRIPT_CHUNK_SIZE:
+    for record in records:
+        record.sequence = state.next_sequence
+        current_chunk.records.append(record)
+        state.next_sequence += 1
+        if record.role == ROLE_CUSTOMER:
+            state.customer_message_count += 1
+        else:
+            state.assistant_reply_count += 1
+        if len(current_chunk.records) < TRANSCRIPT_CHUNK_SIZE:
+            continue
         token = archived_chunk_token(current_chunk.records[0].sequence)
         TRANSCRIPT_CHUNKS.set(context, token, current_chunk)
         state.newest_archived_chunk_token = token
@@ -199,7 +207,7 @@ def append_record_to_transcript(
             evict_oldest_archived_chunk(context, state, summarizer)
     TRANSCRIPT_CHUNKS.set(context, CURRENT_CHUNK_TOKEN, current_chunk)
     CONVERSATION_STATE.set(context, state)
-    return state, record
+    return state
 
 
 def evict_oldest_archived_chunk(

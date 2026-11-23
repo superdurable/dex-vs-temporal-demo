@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from pathlib import Path
 
 from dex import AsyncWorker, PullWorkerOptions, WorkerOptions
 
@@ -13,6 +14,8 @@ from support_conversation.app import (
     open_process_blob_cache,
     server_address_from_environment,
 )
+
+FLOW_DEFINITIONS_DIRECTORY = Path(__file__).resolve().parent / "flow-definitions"
 
 
 async def run_worker() -> None:
@@ -25,6 +28,9 @@ async def run_worker() -> None:
         WorkerOptions(
             server_address=server_address,
             pull=PullWorkerOptions(max_concurrent_tasks=32),
+            # Regenerate after Flow changes: dexcli visualize support_conversation/flow.py
+            # --schema-version 2.0 --json --out flow-definitions/SupportConversationFlow
+            flow_definition_paths=(str(FLOW_DEFINITIONS_DIRECTORY),),
         ),
     )
     shutdown_requested = asyncio.Event()

@@ -1,6 +1,6 @@
 """Command-line driver for SupportConversationFlow (same contract as the Temporal side).
 
-  start <conversation-id> [--idle-seconds N]
+  start <conversation-id> --first-message <text> [--idle-seconds N] [--close-after-seconds N]
   post <conversation-id> <text>
   assign <conversation-id> <agent-name>
   page <conversation-id> [token]
@@ -49,7 +49,8 @@ from support_conversation.transcript import (
     CURRENT_CHUNK_TOKEN,
     SUMMARY,
     TRANSCRIPT_CHUNKS,
-    ConversationStart,
+    ConversationSettings,
+    ReplyRequest,
     ConversationState,
     TranscriptChunk,
     count_retained_archived_chunks,
@@ -82,8 +83,14 @@ class SupportConversationDriver:
         self.flow = flow
 
     async def start_conversation(
-        self, conversation_id: str, idle_seconds: int, close_after_seconds: int
+        self,
+        conversation_id: str,
+        first_message: str,
+        idle_seconds: int,
+        close_after_seconds: int,
     ) -> None:
+        if not first_message.strip():
+            raise ValueError("--first-message must not be empty")
         options = (
             StartFlowOptions(
                 request_id=f"start-{conversation_id}", ignore_already_started=True
@@ -94,13 +101,17 @@ class SupportConversationDriver:
         run_id = await self.client.start_flow(
             self.flow,
             conversation_id,
-            ConversationStart(idle_seconds, close_after_seconds),
+            ReplyRequest(
+                ConversationSettings(idle_seconds, close_after_seconds),
+                [first_message],
+            ),
             options,
         )
         print_json(
             {
                 "conversation": conversation_id,
                 "runId": run_id,
+                "firstMessage": first_message,
                 "idleSeconds": idle_seconds,
                 "closeAfterSeconds": close_after_seconds,
             }
@@ -162,9 +173,9 @@ class SupportConversationDriver:
         max_seconds: float,
     ) -> int:
         baseline = await self.client.get_attributes(conversation_id, CONVERSATION_STATE)
-        baseline_replies = (
+        baseline_customers = (
             baseline.get(CONVERSATION_STATE) or ConversationState()
-        ).assistant_reply_count
+        ).customer_message_count
         started = time.monotonic()
         next_index = 0
         accepted = 0
@@ -220,38 +231,44 @@ class SupportConversationDriver:
             if info.status != FlowStatus.RUNNING:
                 result["error"] = {"message": f"Flow is {info.status.name}"}
         if "error" not in result:
-            result["allRepliedSeconds"] = await self.wait_until_replied(
-                conversation_id, baseline_replies + accepted, started, max_seconds
+            result["allAnsweredSeconds"] = await self.wait_until_answered(
+                conversation_id, baseline_customers + accepted, started, max_seconds
             )
+            if result["allAnsweredSeconds"] is None:
+                result["error"] = {"message": f"not all answered after --max-seconds {max_seconds}"}
         print_json({"flood": result})
         print_json({"status": await self.read_status(conversation_id)})
         return 1 if "error" in result else 0
 
 
-    async def wait_until_replied(
+    async def wait_until_answered(
         self,
         conversation_id: str,
-        expected_replies: int,
+        expected_customer_messages: int,
         started: float,
         max_seconds: float,
     ) -> float | None:
-        """Wait until the Flow has answered every flooded message; None on timeout."""
-        last_report = 0.0
+        """Wait until every flooded message is answered and recorded; None on timeout.
+
+        A customer message is recorded in the same commit as the reply to it.
+        """
+        last_report = -30.0
         while time.monotonic() - started <= max_seconds:
             values = await self.client.get_attributes(conversation_id, CONVERSATION_STATE)
             state = values.get(CONVERSATION_STATE) or ConversationState()
             elapsed = time.monotonic() - started
-            if state.assistant_reply_count >= expected_replies:
-                print(f"replied all={state.assistant_reply_count} elapsed_seconds={elapsed:.1f}", flush=True)
+            progress = (
+                f"customer_recorded={state.customer_message_count}/"
+                f"{expected_customer_messages} replies={state.assistant_reply_count} "
+                f"elapsed_seconds={elapsed:.1f}"
+            )
+            if state.customer_message_count >= expected_customer_messages:
+                print(f"answered all {progress}", flush=True)
                 return round(elapsed, 1)
             if elapsed - last_report >= 30:
                 last_report = elapsed
-                print(
-                    f"replying replies={state.assistant_reply_count}/{expected_replies} "
-                    f"elapsed_seconds={elapsed:.1f}",
-                    flush=True,
-                )
-            await asyncio.sleep(2)
+                print(f"answering {progress}", flush=True)
+            await asyncio.sleep(1)
         return None
 
 
@@ -313,6 +330,7 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     commands = parser.add_subparsers(dest="command", required=True)
     start = commands.add_parser("start")
     start.add_argument("conversation_id")
+    start.add_argument("--first-message", required=True)
     start.add_argument("--idle-seconds", type=int, default=600)
     start.add_argument("--close-after-seconds", type=int, default=3600)
     post = commands.add_parser("post")
@@ -348,6 +366,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
         if arguments.command == "start":
             await driver.start_conversation(
                 arguments.conversation_id,
+                arguments.first_message,
                 arguments.idle_seconds,
                 arguments.close_after_seconds,
             )

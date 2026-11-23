@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # D5: flood one long-lived AI support conversation with 60,000 customer
-# messages; the Flow answers each one with an AI reply. Record accepted
-# messages, wall-clock time until every reply is recorded, final status,
+# messages; each AI reply answers the messages queued since the last reply.
+# Record accepted messages, wall-clock time until every message is answered,
+# final status,
 # record count, retained chunks, and the Summary, then read the newest page
 # and older pages. KEEP=1 leaves Dex running.
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -38,7 +39,8 @@ print(json.dumps({
   start_worker
 
   log "start $CONVERSATION_ID with idle ${IDLE_SECONDS}s, close after ${CLOSE_AFTER_SECONDS}s"
-  drive start "$CONVERSATION_ID" --idle-seconds "$IDLE_SECONDS" \
+  drive start "$CONVERSATION_ID" --first-message "Hi, I have many questions about my orders." \
+    --idle-seconds "$IDLE_SECONDS" \
     --close-after-seconds "$CLOSE_AFTER_SECONDS"
   drive assign "$CONVERSATION_ID" "flood-agent"
 

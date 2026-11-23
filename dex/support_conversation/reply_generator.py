@@ -17,7 +17,7 @@ class GeneratedReply:
 
 class ReplyGenerator(Protocol):
     def generate_reply(
-        self, conversation_id: str, customer_sequence: int, customer_text: str
+        self, conversation_id: str, customer_messages: list[str]
     ) -> GeneratedReply: ...
 
 
@@ -27,10 +27,10 @@ class MockReplyGenerator:
     TOOLS = ("lookup_order", "check_refund_policy", "check_shipping_status")
 
     def generate_reply(
-        self, conversation_id: str, customer_sequence: int, customer_text: str
+        self, conversation_id: str, customer_messages: list[str]
     ) -> GeneratedReply:
         digest = hashlib.sha256(
-            f"{conversation_id}:{customer_sequence}:{customer_text}".encode()
+            "\n".join([conversation_id, *customer_messages]).encode()
         ).digest()
         tool_calls = [self.TOOLS[digest[0] % len(self.TOOLS)]]
         if digest[1] % 2 == 0:
