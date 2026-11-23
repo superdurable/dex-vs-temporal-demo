@@ -16,9 +16,14 @@ HISTORY_DIR="$RUN_DIR/d2-history"
 
 trap stop_everything_unless_kept EXIT
 
+count_nudges() {
+  [[ -f "$OUTBOX" ]] || { echo 0; return; }
+  grep -c "\"conversation\": \"$CONVERSATION_C\", \"kind\": \"nudge\"" "$OUTBOX" || true
+}
+
 wait_for_nudge_count() {
   local expected="$1" deadline=$((SECONDS + $2))
-  until (($(grep -c "\"conversation\": \"$CONVERSATION_C\", \"kind\": \"nudge\"" "$OUTBOX" 2>/dev/null || true) >= expected)); do
+  until (($(count_nudges) >= expected)); do
     if ((SECONDS > deadline)); then
       log "timed out waiting for nudge $expected"
       return 1
