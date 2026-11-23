@@ -1,0 +1,11 @@
+[project]
+name = "dex-support-conversation-demo"
+version = "0.1.0"
+description = "Customer support conversation with an idle timeout, built on Dex"
+requires-python = ">=3.11"
+dependencies = [
+    "dex-python-sdk==1.45.17",
+]
+
+[tool.uv]
+package = false
