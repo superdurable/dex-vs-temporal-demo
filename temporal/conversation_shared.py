@@ -80,14 +80,6 @@ class ReplyRequest:
 
 
 @dataclass
-class ContextReplyRequest:
-    conversation_id: str
-    customer_sequence: int
-    # Every transcript record appended so far, as a model call would need it.
-    context: list[TranscriptMessage] = field(default_factory=list)
-
-
-@dataclass
 class GeneratedReply:
     text: str
     tool_calls: list[str] = field(default_factory=list)

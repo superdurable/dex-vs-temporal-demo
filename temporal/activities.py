@@ -1,8 +1,6 @@
 """Activities that stand in for an LLM, an email provider, and a summary channel.
 
-generate_reply is a deterministic local mock; generate_reply_from_context
-returns the same reply from a request that carries the conversation
-context. The outbox activities append a
+generate_reply is a deterministic local mock. The outbox activities append a
 single JSON line to the shared demo outbox file instead of calling a real
 provider. The outbox is a demo file: a retried activity can append a
 duplicate line, where a real provider call would use an idempotency key.
@@ -17,13 +15,7 @@ from pathlib import Path
 
 from temporalio import activity
 
-from conversation_shared import (
-    ROLE_CUSTOMER,
-    ContextReplyRequest,
-    GeneratedReply,
-    OutboxRequest,
-    ReplyRequest,
-)
+from conversation_shared import GeneratedReply, OutboxRequest, ReplyRequest
 
 REPLY_BYTES = 200
 TOOL_CALLS_BY_KEYWORD = (
@@ -79,30 +71,6 @@ async def generate_reply(request: ReplyRequest) -> GeneratedReply:
     return build_mock_reply(
         request.customer_sequence, request.customer_text, request.sentiment
     )
-
-
-@activity.defn
-async def generate_reply_from_context(request: ContextReplyRequest) -> GeneratedReply:
-    """The same mock, called with the conversation context a real model needs.
-
-    It reads only the customer message being answered; the context is
-    passed to show what a real model call puts into the activity input.
-    """
-    customer_text = next(
-        (
-            message.text
-            for message in request.context
-            if message.sequence == request.customer_sequence
-            and message.role == ROLE_CUSTOMER
-        ),
-        None,
-    )
-    if customer_text is None:
-        raise ValueError(
-            f"customer message {request.customer_sequence} is not in the context "
-            f"of {len(request.context)} messages"
-        )
-    return build_mock_reply(request.customer_sequence, customer_text)
 
 
 NEGATIVE_WORDS = ("angry", "broken", "late", "never", "not", "refund", "wrong")

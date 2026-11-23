@@ -27,10 +27,10 @@ from temporalio.worker import Worker
 from activities import (
     analyze_sentiment,
     generate_reply,
-    generate_reply_from_context,
     post_close_summary,
     send_nudge_email,
 )
+from context_reply_activity import generate_reply_from_context
 from conversation_shared import TASK_QUEUE
 from conversation_workflow_inline_transcript import (
     ConversationWorkflowContinueAsNewInlineTranscript,

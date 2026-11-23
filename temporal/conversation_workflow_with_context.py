@@ -16,11 +16,8 @@ from datetime import timedelta
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
-    from activities import (
-        generate_reply_from_context,
-        post_close_summary,
-        send_nudge_email,
-    )
+    from activities import post_close_summary, send_nudge_email
+    from context_reply_activity import ContextReplyRequest, generate_reply_from_context
     from conversation_shared import (
         CONTEXT_IN_ACTIVITY_WORKFLOW_TYPE,
         ROLE_ASSISTANT,
@@ -29,7 +26,6 @@ with workflow.unsafe.imports_passed_through():
         STATUS_NUDGED,
         STATUS_OPEN,
         ConversationInput,
-        ContextReplyRequest,
         ConversationSummary,
         OutboxRequest,
         TranscriptMessage,
