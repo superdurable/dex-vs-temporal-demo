@@ -7,6 +7,8 @@ runs the ConversationWorkflow type:
   v1  conversation_workflow.py     the original code
   v2  conversation_workflow_v2.py  adds sentiment analysis, unguarded
   v3  conversation_workflow_v3.py  adds sentiment analysis behind a patch
+The naive, Continue-As-New inline transcript, and context-in-activity
+(ConversationWithContextWorkflow) variants are always registered.
 Set DEMO_WORKER_PID_FILE to have the worker write its process ID there, so
 scripts can stop exactly this process. SIGINT or SIGTERM stops it.
 """
@@ -25,6 +27,7 @@ from temporalio.worker import Worker
 from activities import (
     analyze_sentiment,
     generate_reply,
+    generate_reply_from_context,
     post_close_summary,
     send_nudge_email,
 )
@@ -32,6 +35,7 @@ from conversation_shared import TASK_QUEUE
 from conversation_workflow_inline_transcript import (
     ConversationWorkflowContinueAsNewInlineTranscript,
 )
+from conversation_workflow_with_context import ConversationWithContextWorkflow
 from local_file_storage import build_data_converter
 from naive_conversation_workflow import NaiveConversationWorkflow
 
@@ -61,9 +65,11 @@ async def run_worker() -> None:
             NaiveConversationWorkflow,
             conversation_module.ConversationWorkflow,
             ConversationWorkflowContinueAsNewInlineTranscript,
+            ConversationWithContextWorkflow,
         ],
         activities=[
             generate_reply,
+            generate_reply_from_context,
             analyze_sentiment,
             send_nudge_email,
             post_close_summary,

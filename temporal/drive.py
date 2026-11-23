@@ -6,7 +6,8 @@ Usage (from this directory):
   uv run --locked drive.py assign <conversation-id> <agent-name>
   uv run --locked drive.py page <conversation-id> [token]
   uv run --locked drive.py status <conversation-id>
-  uv run --locked drive.py flood <conversation-id> --count N --rate R [--message-bytes B] [--backlog-timeout S] [--result-file F]
+  uv run --locked drive.py flood <conversation-id> --count N --rate R [--message-bytes B] [--backlog-timeout S] [--stop-when-stalled S] [--result-file F]
+  uv run --locked drive.py context-report <conversation-id> [--output F]
   uv run --locked drive.py inspect <conversation-id> [--run-id R] [--dump history.json]
   uv run --locked drive.py wait-replies <conversation-id> --count N [--timeout S] [--expect reply|stall] [--failure-cause C] [--expect-patch-marker]
   uv run --locked drive.py watch-task-retries <conversation-id> --seconds N [--interval S]
@@ -42,6 +43,7 @@ from temporalio.api.enums.v1 import EventType, WorkflowTaskFailedCause
 from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.history.v1 import HistoryEvent
 from temporalio.api.workflowservice.v1 import (
+    GetWorkflowExecutionHistoryRequest,
     GetWorkflowExecutionHistoryReverseRequest,
 )
 from temporalio.client import Client, WorkflowHandle
@@ -51,6 +53,7 @@ from activities import OUTBOX_FILE
 from local_file_storage import build_data_converter
 
 from conversation_shared import (
+    CONTEXT_IN_ACTIVITY_WORKFLOW_TYPE,
     CORRECT_WORKFLOW_TYPE,
     DEFAULT_CLOSE_AFTER_SECONDS,
     DEFAULT_IDLE_SECONDS,
@@ -64,7 +67,18 @@ WORKFLOW_TYPE_BY_VARIANT = {
     "naive": NAIVE_WORKFLOW_TYPE,
     "correct": CORRECT_WORKFLOW_TYPE,
     "continue-as-new-inline-transcript": INLINE_TRANSCRIPT_WORKFLOW_TYPE,
+    "context-in-activity": CONTEXT_IN_ACTIVITY_WORKFLOW_TYPE,
 }
+REPLY_ACTIVITY_TYPES = frozenset({"generate_reply", "generate_reply_from_context"})
+CONTEXT_REPLY_ACTIVITY_TYPE = "generate_reply_from_context"
+STALL_WORKFLOW_TASK_ATTEMPTS = 3
+STALL_CHECK_SECONDS = 2
+# Small pages keep each read far below gRPC message limits when events are large.
+LARGE_HISTORY_PAGE_EVENTS = 24
+PAYLOAD_WARNING_BYTES = 512 * 1024
+PAYLOAD_ERROR_BYTES = 2 * 1024 * 1024
+HISTORY_SIZE_WARNING_BYTES = 10 * 1024 * 1024
+HISTORY_COUNT_WARNING_EVENTS = 10 * 1024
 FLOOD_MESSAGE_BYTES = 200
 FLOOD_INDEX_MINIMUM_WIDTH = 6
 FLOOD_PROGRESS_SECONDS = 60
@@ -310,6 +324,9 @@ class FloodProgress:
     rejection: dict[str, Any] | None = None
     max_schedule_lag_seconds: float = 0.0
     sending_finished: bool = False
+    # Set by the stall watch; the sending loop stops when it is not empty.
+    stop_reason: str = ""
+    stopped_at: float = 0.0
 
 
 async def observe_flood(
@@ -339,6 +356,77 @@ async def observe_flood(
         except Exception as error:
             line += f" query_error=({describe_error(error)})"
         print(line, flush=True)
+
+
+async def read_latest_completed_activity_event_id(client: Client, conversation_id: str) -> int:
+    """Returns the newest ActivityTaskCompleted event ID among the last events, or 0."""
+    response = await client.workflow_service.get_workflow_execution_history_reverse(
+        GetWorkflowExecutionHistoryReverseRequest(
+            namespace=client.namespace,
+            execution=WorkflowExecution(workflow_id=conversation_id),
+            maximum_page_size=LARGE_HISTORY_PAGE_EVENTS,
+        ),
+        timeout=READ_RPC_TIMEOUT,
+    )
+    return max(
+        (
+            event.event_id
+            for event in response.history.events
+            if event.HasField("activity_task_completed_event_attributes")
+        ),
+        default=0,
+    )
+
+
+async def watch_for_stall(
+    client: Client,
+    handle: WorkflowHandle,
+    progress: FloodProgress,
+    stall_seconds: float,
+) -> None:
+    """Stops the flood when the workflow closes, its workflow task keeps
+    failing, or no activity completes for stall_seconds.
+
+    Reads describe and the newest events only; a query would make the
+    worker replay a large history.
+    """
+    last_completed: tuple[str | None, int] = ("", 0)
+    last_progress_at = time.monotonic()
+    while not progress.sending_finished:
+        await asyncio.sleep(STALL_CHECK_SECONDS)
+        now = time.monotonic()
+        try:
+            description = await handle.describe(rpc_timeout=READ_RPC_TIMEOUT)
+            status = description.status.name if description.status else "UNKNOWN"
+            if status != "RUNNING":
+                progress.stop_reason = f"workflow status {status}"
+            else:
+                attempt = describe_pending_workflow_task(description).get("attempt", 0)
+                if attempt >= STALL_WORKFLOW_TASK_ATTEMPTS:
+                    progress.stop_reason = (
+                        f"workflow task failing repeatedly (pending attempt {attempt})"
+                    )
+                else:
+                    completed_event_id = await read_latest_completed_activity_event_id(
+                        client, handle.id
+                    )
+                    # Event IDs restart in each run after Continue-As-New.
+                    latest_completed = (description.run_id, completed_event_id)
+                    if completed_event_id and latest_completed != last_completed:
+                        last_completed = latest_completed
+                        last_progress_at = now
+        except Exception as error:
+            print(f"stall watch read error: {describe_error(error)}", flush=True)
+        if not progress.stop_reason and now - last_progress_at >= stall_seconds:
+            progress.stop_reason = f"no activity completed for {stall_seconds:.0f}s"
+        if progress.stop_reason:
+            progress.stopped_at = now
+            print(
+                f"STALL WATCH stops the flood: {progress.stop_reason} "
+                f"elapsed={now - progress.started_at:.1f}s acknowledged={len(progress.acknowledged)}",
+                flush=True,
+            )
+            return
 
 
 async def wait_for_reply_backlog(
@@ -403,7 +491,14 @@ async def flood_conversation(client: Client, args: argparse.Namespace) -> int:
     observer = asyncio.create_task(
         observe_flood(handle, progress, args.progress_seconds)
     )
+    stall_watch = (
+        asyncio.create_task(watch_for_stall(client, handle, progress, args.stop_when_stalled))
+        if args.stop_when_stalled > 0
+        else None
+    )
     for index in range(1, args.count + 1):
+        if progress.stop_reason:
+            break
         if args.rate > 0:
             scheduled_at = progress.started_at + (index - 1) / args.rate
             delay = scheduled_at - time.monotonic()
@@ -432,7 +527,11 @@ async def flood_conversation(client: Client, args: argparse.Namespace) -> int:
         progress.acknowledged.append(index)
     progress.sending_finished = True
     observer.cancel()
-    await asyncio.gather(observer, return_exceptions=True)
+    background_tasks = [observer]
+    if stall_watch:
+        stall_watch.cancel()
+        background_tasks.append(stall_watch)
+    await asyncio.gather(*background_tasks, return_exceptions=True)
     elapsed = time.monotonic() - progress.started_at
 
     if progress.rejection:
@@ -458,6 +557,7 @@ async def flood_conversation(client: Client, args: argparse.Namespace) -> int:
         "client_timeout_count": len(progress.client_timeouts),
         "client_timeouts": progress.client_timeouts,
         "rejection": progress.rejection,
+        "stall_watch_stop_reason": progress.stop_reason,
         "elapsed_seconds": round(elapsed, 3),
         "achieved_rate_per_second": round(progress.rpc_attempts / elapsed, 2) if elapsed else 0,
         "max_schedule_lag_seconds": round(progress.max_schedule_lag_seconds, 3),
@@ -469,7 +569,8 @@ async def flood_conversation(client: Client, args: argparse.Namespace) -> int:
         f"rejected={'1 (message ' + str(progress.rejection['index']) + ')' if progress.rejection else 0} "
         f"elapsed={elapsed:.1f}s achieved_rate={result['achieved_rate_per_second']}/s "
         f"max_schedule_lag={result['max_schedule_lag_seconds']}s "
-        "(flood counts exclude the first message, which arrived with the start)",
+        + (f"stall_watch_stop=({progress.stop_reason}) " if progress.stop_reason else "")
+        + "(flood counts exclude the first message, which arrived with the start)",
         flush=True,
     )
     if args.result_file:
@@ -637,7 +738,9 @@ async def inspect_run(
     completed = [record for record in activities.values() if record.outcome == "completed"]
     completed.sort(key=lambda record: record.outcome_time or record.scheduled_time)
     activity_types_completed = [record.activity_type for record in completed]
-    replies = activity_types_completed.count("generate_reply")
+    replies = sum(
+        1 for activity_type in activity_types_completed if activity_type in REPLY_ACTIVITY_TYPES
+    )
     task_failures = workflow_task_failures(events)
     report: dict[str, Any] = {
         "conversation": conversation_id,
@@ -709,7 +812,7 @@ async def wait_for_replies(client: Client, args: argparse.Namespace) -> int:
         replies = sum(
             1
             for record in activities.values()
-            if record.activity_type == "generate_reply" and record.outcome == "completed"
+            if record.activity_type in REPLY_ACTIVITY_TYPES and record.outcome == "completed"
         )
         failures = [
             failure
@@ -793,7 +896,7 @@ async def print_runs(client: Client, args: argparse.Namespace) -> int:
         replies = sum(
             1
             for record in activities.values()
-            if record.activity_type == "generate_reply" and record.outcome == "completed"
+            if record.activity_type in REPLY_ACTIVITY_TYPES and record.outcome == "completed"
         )
         signals = sum(
             1
@@ -1079,6 +1182,178 @@ async def verify_transcript(client: Client, args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Context-in-activity report
+
+
+@dataclass
+class ContextHistoryWalk:
+    """Counts gathered while walking one run's history forward in small pages."""
+
+    event_count: int = 0
+    serialized_event_bytes: int = 0
+    followups_accepted: int = 0
+    replies_scheduled: int = 0
+    replies_completed: int = 0
+    largest_input_bytes: int = 0
+    last_scheduled_input: Any = None
+    last_scheduled_event_id: int = 0
+    last_completed_input: Any = None
+    workflow_task_failures: list[dict[str, Any]] = field(default_factory=list)
+    termination_reason: str = ""
+    last_event: dict[str, Any] = field(default_factory=dict)
+    # Message counts when a default warning or error threshold was first crossed.
+    thresholds: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def record_threshold(self, name: str, event: HistoryEvent, detail: str) -> None:
+        if name in self.thresholds:
+            return
+        self.thresholds[name] = {
+            "event_id": event.event_id,
+            "time": event.event_time.ToJsonString(),
+            "followups_accepted": self.followups_accepted,
+            "replies_completed": self.replies_completed,
+            "detail": detail,
+        }
+
+
+async def walk_context_history(client: Client, conversation_id: str) -> ContextHistoryWalk:
+    walk = ContextHistoryWalk()
+    scheduled_inputs: dict[int, Any] = {}
+    page_token = b""
+    while True:
+        response = await client.workflow_service.get_workflow_execution_history(
+            GetWorkflowExecutionHistoryRequest(
+                namespace=client.namespace,
+                execution=WorkflowExecution(workflow_id=conversation_id),
+                maximum_page_size=LARGE_HISTORY_PAGE_EVENTS,
+                next_page_token=page_token,
+            ),
+            timeout=READ_RPC_TIMEOUT,
+        )
+        for event in response.history.events:
+            walk.event_count += 1
+            walk.serialized_event_bytes += event.ByteSize()
+            if event.HasField("workflow_execution_signaled_event_attributes"):
+                if event.workflow_execution_signaled_event_attributes.signal_name == "post_message":
+                    walk.followups_accepted += 1
+            elif event.HasField("activity_task_scheduled_event_attributes"):
+                attributes = event.activity_task_scheduled_event_attributes
+                if attributes.activity_type.name == CONTEXT_REPLY_ACTIVITY_TYPE:
+                    input_bytes = attributes.input.ByteSize()
+                    walk.replies_scheduled += 1
+                    walk.largest_input_bytes = max(walk.largest_input_bytes, input_bytes)
+                    walk.last_scheduled_input = attributes.input
+                    walk.last_scheduled_event_id = event.event_id
+                    scheduled_inputs[event.event_id] = attributes.input
+                    for name, limit in (
+                        ("payload_warning_512_KiB", PAYLOAD_WARNING_BYTES),
+                        ("payload_error_2_MiB", PAYLOAD_ERROR_BYTES),
+                    ):
+                        if input_bytes >= limit:
+                            walk.record_threshold(name, event, f"activity input {input_bytes} bytes")
+            elif event.HasField("activity_task_completed_event_attributes"):
+                scheduled_event_id = event.activity_task_completed_event_attributes.scheduled_event_id
+                completed_input = scheduled_inputs.pop(scheduled_event_id, None)
+                if completed_input is not None:
+                    walk.replies_completed += 1
+                    walk.last_completed_input = completed_input
+            elif event.HasField("workflow_execution_terminated_event_attributes"):
+                walk.termination_reason = event.workflow_execution_terminated_event_attributes.reason
+            walk.workflow_task_failures.extend(workflow_task_failures([event]))
+            if walk.serialized_event_bytes >= HISTORY_SIZE_WARNING_BYTES:
+                walk.record_threshold(
+                    "history_size_warning_10_MiB",
+                    event,
+                    f"{walk.serialized_event_bytes} serialized event bytes",
+                )
+            if walk.event_count >= HISTORY_COUNT_WARNING_EVENTS:
+                walk.record_threshold("history_count_warning_10240_events", event, "")
+            walk.last_event = describe_event_briefly(event)
+        page_token = response.next_page_token
+        if not page_token:
+            return walk
+
+
+async def describe_context_request(client: Client, payloads: Any) -> dict[str, Any]:
+    """Returns the size and the answered customer message of one reply request."""
+    if payloads is None:
+        return {}
+    request = (await client.data_converter.decode(list(payloads.payloads)))[0]
+    context = request["context"]
+    customer_text = next(
+        (
+            message["text"]
+            for message in context
+            if message["sequence"] == request["customer_sequence"]
+        ),
+        "",
+    )
+    match = FLOOD_INDEX_PATTERN.match(customer_text)
+    return {
+        "payloads_bytes": payloads.ByteSize(),
+        "payload_data_bytes": sum(len(payload.data) for payload in payloads.payloads),
+        "context_messages": len(context),
+        "customer_sequence": request["customer_sequence"],
+        "answers_flood_message": int(match.group(1)) if match else 0,
+    }
+
+
+async def print_context_report(client: Client, args: argparse.Namespace) -> int:
+    """Reports how a context-in-activity run ended, from describe and history.
+
+    History is read forward in pages of a few events, because each
+    reply's input holds the whole transcript.
+    """
+    description = await client.get_workflow_handle(args.conversation_id).describe(
+        rpc_timeout=READ_RPC_TIMEOUT
+    )
+    info = description.raw_description.workflow_execution_info
+    walk = await walk_context_history(client, args.conversation_id)
+    end_time = info.close_time if info.HasField("close_time") else None
+    report: dict[str, Any] = {
+        "conversation": args.conversation_id,
+        "run_id": description.run_id,
+        "workflow_type": description.workflow_type,
+        "workflow_status": description.status.name if description.status else None,
+        "seconds_from_start_to_close": round(
+            (end_time.ToDatetime() - info.start_time.ToDatetime()).total_seconds(), 1
+        )
+        if end_time
+        else None,
+        "history_event_count": description.history_length,
+        "history_size_bytes": info.history_size_bytes,
+        "serialized_event_bytes_read": walk.serialized_event_bytes,
+        "followup_messages_accepted": walk.followups_accepted,
+        "reply_activities_scheduled": walk.replies_scheduled,
+        "reply_activities_completed": walk.replies_completed,
+        "followup_messages_answered": max(walk.replies_completed - 1, 0),
+        "last_reply_completed": await describe_context_request(client, walk.last_completed_input),
+        "last_reply_scheduled": {
+            "event_id": walk.last_scheduled_event_id,
+            **await describe_context_request(client, walk.last_scheduled_input),
+        },
+        "largest_reply_input_payloads_bytes": walk.largest_input_bytes,
+        "termination_reason": walk.termination_reason,
+        "workflow_task_failed_events": len(walk.workflow_task_failures),
+        "first_workflow_task_failure": walk.workflow_task_failures[0]
+        if walk.workflow_task_failures
+        else None,
+        "last_workflow_task_failure": walk.workflow_task_failures[-1]
+        if walk.workflow_task_failures
+        else None,
+        "pending_workflow_task": describe_pending_workflow_task(description),
+        "last_event": walk.last_event,
+        "thresholds_first_crossed": walk.thresholds,
+        "counts_exclude_the_first_message": True,
+    }
+    print_json(report)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as report_output:
+            json.dump(report, report_output, indent=2)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # History summary and per-message breakdown
 
 
@@ -1301,8 +1576,24 @@ def build_argument_parser() -> argparse.ArgumentParser:
     flood.add_argument(
         "--progress-seconds", type=positive_float, default=FLOOD_PROGRESS_SECONDS
     )
+    flood.add_argument(
+        "--stop-when-stalled",
+        type=non_negative_float,
+        default=0,
+        help="stop sending when the workflow closes, its workflow task fails "
+        f"{STALL_WORKFLOW_TASK_ATTEMPTS} times in a row, or no activity completes "
+        "for this many seconds; 0 turns the watch off",
+    )
     flood.add_argument("--result-file", default="", help="write the flood counts as JSON here")
     flood.set_defaults(handler=flood_conversation)
+
+    context_report = commands.add_parser(
+        "context-report",
+        help="final state of a context-in-activity run, read from history in small pages",
+    )
+    context_report.add_argument("conversation_id")
+    context_report.add_argument("--output", default="", help="also write the report JSON here")
+    context_report.set_defaults(handler=print_context_report)
 
     inspect = commands.add_parser(
         "inspect", help="read a run's history: replies, activity types, workflow task failures"

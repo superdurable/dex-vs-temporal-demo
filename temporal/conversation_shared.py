@@ -12,6 +12,7 @@ TASK_QUEUE = "conversation-demo"
 NAIVE_WORKFLOW_TYPE = "NaiveConversationWorkflow"
 CORRECT_WORKFLOW_TYPE = "ConversationWorkflow"
 INLINE_TRANSCRIPT_WORKFLOW_TYPE = "ConversationWorkflowContinueAsNewInlineTranscript"
+CONTEXT_IN_ACTIVITY_WORKFLOW_TYPE = "ConversationWithContextWorkflow"
 SENTIMENT_PATCH_ID = "analyze-sentiment-before-reply"
 
 DEFAULT_IDLE_SECONDS = 600
@@ -76,6 +77,14 @@ class ReplyRequest:
     customer_text: str
     # Empty when the workflow code did not run sentiment analysis.
     sentiment: str = ""
+
+
+@dataclass
+class ContextReplyRequest:
+    conversation_id: str
+    customer_sequence: int
+    # Every transcript record appended so far, as a model call would need it.
+    context: list[TranscriptMessage] = field(default_factory=list)
 
 
 @dataclass

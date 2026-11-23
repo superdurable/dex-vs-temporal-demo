@@ -87,6 +87,7 @@ Load: follow-up messages at 8 per second, one AI reply per message, about 200 by
 | --- | --- |
 | `scripts/temporal/t5-flood.sh` | The correct workflow, no Continue-As-New |
 | `scripts/temporal/t6-continue-as-new.sh` | Continue-As-New that carries the whole transcript |
+| `scripts/temporal/t8-context-in-activity.sh` | The correct workflow, with the conversation context passed to each reply activity |
 | `scripts/dex/d5-flood-fair.sh` | The Dex Flow for 30 minutes |
 | `scripts/dex/d7-transcript-budget.sh` | Dex only: the transcript size budget with large messages |
 
@@ -103,6 +104,16 @@ Temporal, Continue-As-New with the transcript carried inline (`t6-continue-as-ne
 - After 3,531 answered follow-up messages, the next run's input was 2,199,782 bytes. The limit is 2,097,152. The workflow task fails: `[TMPRL1103] Attempted to upload payloads with size that exceeded the error limit.` The workflow stays Running, keeps accepting signals, and stops replying.
 - The stop point moves with the timing of each Continue-As-New.
 - With the SDK's External Storage (Public Preview) and a local directory as the store, 10,000 messages were each answered once. The stored objects stayed after the workflow completed: Temporal does not delete them.
+
+Temporal, the conversation context passed to the reply activity (`t8-context-in-activity.sh`):
+
+- In the workflows above, `generate_reply` receives only the current customer message, because the reply is a mock. A real model call needs the conversation. `ConversationWithContextWorkflow` is `ConversationWorkflow` with one change: each reply activity, `generate_reply_from_context`, receives every transcript record appended so far (customer messages and AI replies). It returns the same mock reply. No Continue-As-New, no External Storage.
+- Temporal records an activity's input in its `ActivityTaskScheduled` event. Each reply copies the transcript into history again, so history grows with the square of the message count.
+- 200-byte messages at 8 per second, two runs: 408 follow-up messages accepted, 407 answered in 51 s. The server terminated the workflow at 52,602,325 history bytes and 4,907 events: `Workflow history size exceeds limit.` The 409th message is rejected: `workflow execution already completed`. The last reply input was 253,509 bytes, with 817 transcript records.
+- 8 KiB messages at 2 per second, two runs: 109 follow-up messages accepted, 108 answered in 54 s. The same termination at 52,719,078 bytes and 1,319 events. The last reply input was 938,958 bytes. A run at 8 per second stopped at the same message.
+- The 50 MB history size limit is reached first in both. The 2 MB payload limit is not reached.
+- History passes 10 MB after 181 messages (200 bytes) and after 48 messages (8 KiB); the server logs `history size exceeds warn limit.` With 8 KiB messages, the worker logs the payload warning from message 61 on: `[TMPRL1103] Attempted to upload payloads with size that exceeded the warning limit. size=525534 limit=524288`. With 200-byte messages, no input reaches 512 KB.
+- No workflow task failed, and the worker logged no error before the termination.
 
 Dex (`d5-flood-fair.sh`):
 
