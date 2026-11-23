@@ -1,6 +1,6 @@
 {
   "schemaVersion": "2.0",
-  "generatedAt": "2026-11-23T08:42:29Z",
+  "generatedAt": "2026-11-23T09:26:13Z",
   "valid": true,
   "source": {
     "language": "python",
@@ -277,9 +277,9 @@
       "kind": "attribute",
       "name": "AssignedAgent",
       "span": {
-        "startLine": 57,
+        "startLine": 58,
         "startColumn": 1,
-        "endLine": 57,
+        "endLine": 58,
         "endColumn": 49
       },
       "resource": {
@@ -291,9 +291,9 @@
       "kind": "attribute",
       "name": "ConversationState",
       "span": {
-        "startLine": 56,
+        "startLine": 57,
         "startColumn": 1,
-        "endLine": 56,
+        "endLine": 57,
         "endColumn": 71
       },
       "resource": {
@@ -305,9 +305,9 @@
       "kind": "attribute",
       "name": "Summary",
       "span": {
-        "startLine": 58,
+        "startLine": 59,
         "startColumn": 1,
-        "endLine": 58,
+        "endLine": 59,
         "endColumn": 50
       },
       "resource": {
@@ -319,9 +319,9 @@
       "kind": "attribute",
       "name": "TranscriptChunks",
       "span": {
-        "startLine": 59,
+        "startLine": 60,
         "startColumn": 1,
-        "endLine": 59,
+        "endLine": 60,
         "endColumn": 70
       },
       "resource": {
@@ -334,9 +334,9 @@
       "kind": "channel",
       "name": "CustomerMessages",
       "span": {
-        "startLine": 55,
+        "startLine": 56,
         "startColumn": 1,
-        "endLine": 55,
+        "endLine": 56,
         "endColumn": 53
       },
       "resource": {
@@ -677,9 +677,9 @@
       "to": "step:GenerateReplyStep",
       "label": "get",
       "span": {
-        "startLine": 119,
+        "startLine": 118,
         "startColumn": 17,
-        "endLine": 119,
+        "endLine": 118,
         "endColumn": 48
       },
       "metadata": {
@@ -741,10 +741,10 @@
       "to": "step:GenerateReplyStep",
       "label": "get",
       "span": {
-        "startLine": 133,
-        "startColumn": 21,
-        "endLine": 133,
-        "endColumn": 41
+        "startLine": 129,
+        "startColumn": 23,
+        "endLine": 129,
+        "endColumn": 43
       },
       "metadata": {
         "phase": "execute"
@@ -773,9 +773,9 @@
       "to": "step:GenerateReplyStep",
       "label": "get",
       "span": {
-        "startLine": 121,
+        "startLine": 122,
         "startColumn": 20,
-        "endLine": 121,
+        "endLine": 122,
         "endColumn": 71
       },
       "metadata": {
@@ -927,10 +927,10 @@
       "to": "resource:attribute:SUMMARY",
       "label": "set",
       "span": {
-        "startLine": 130,
+        "startLine": 135,
         "startColumn": 13,
         "endLine": 135,
-        "endColumn": 14
+        "endColumn": 42
       },
       "metadata": {
         "phase": "execute"
@@ -943,10 +943,10 @@
       "to": "resource:attribute:TRANSCRIPT_CHUNKS",
       "label": "delete",
       "span": {
-        "startLine": 136,
-        "startColumn": 13,
-        "endLine": 136,
-        "endColumn": 76
+        "startLine": 134,
+        "startColumn": 17,
+        "endLine": 134,
+        "endColumn": 57
       },
       "metadata": {
         "phase": "execute"

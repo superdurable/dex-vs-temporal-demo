@@ -54,6 +54,7 @@ from support_conversation.transcript import (
     ReplyRequest,
     ConversationState,
     TranscriptChunk,
+    TRANSCRIPT_BUDGET_BYTES,
     count_retained_archived_chunks,
     parse_transcript_page_token,
 )
@@ -167,6 +168,8 @@ class SupportConversationDriver:
             "assistantReplyCount": state.assistant_reply_count,
             "latestRecords": [asdict(record) for record in chunk.records[-4:]],
             "retainedChunkCount": count_retained_archived_chunks(state),
+            "transcriptBytes": state.transcript_bytes,
+            "transcriptBudgetBytes": TRANSCRIPT_BUDGET_BYTES,
             "oldestArchivedChunkToken": state.oldest_archived_chunk_token,
             "newestArchivedChunkToken": state.newest_archived_chunk_token,
             "assignedAgent": values.get(ASSIGNED_AGENT),
@@ -318,6 +321,7 @@ class SupportConversationDriver:
         duration_seconds: float,
         snapshot_thresholds: list[int],
         drain_seconds: float,
+        message_bytes: int,
     ) -> int:
         """Post rate messages per second for duration_seconds, then drain briefly.
 
@@ -340,7 +344,9 @@ class SupportConversationDriver:
             nonlocal accepted, failure
             try:
                 await self.client.invoke_rpc(
-                    self.flow.post_message, conversation_id, flood_message_text(index)
+                    self.flow.post_message,
+                    conversation_id,
+                    flood_message_text(index, message_bytes),
                 )
                 accepted += 1
             except Exception as error:  # report the exact engine rejection
@@ -371,6 +377,8 @@ class SupportConversationDriver:
                 "customerRecorded": state.customer_message_count - baseline_customers,
                 "replies": state.assistant_reply_count,
                 "backlog": baseline_customers + accepted - state.customer_message_count,
+                "transcriptBytes": state.transcript_bytes,
+                "retainedChunkCount": count_retained_archived_chunks(state),
             }
 
         async def report_until_stopped() -> None:
@@ -419,10 +427,11 @@ class SupportConversationDriver:
         return 1 if failure is not None else 0
 
 
-def flood_message_text(index: int) -> str:
+def flood_message_text(index: int, message_bytes: int = FLOOD_MESSAGE_BYTES) -> str:
     prefix = f"flood message {index + 1:06d}: "
-    filler = "customer asks about order status and delivery window " * 5
-    return (prefix + filler)[:FLOOD_MESSAGE_BYTES]
+    filler = "customer asks about order status and delivery window "
+    repeats = message_bytes // len(filler) + 1
+    return (prefix + filler * repeats)[:message_bytes]
 
 
 def read_history_event_summary(conversation_id: str) -> dict[str, int | None]:
@@ -508,6 +517,7 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
         help="comma-separated accepted counts at which to record a snapshot",
     )
     paced.add_argument("--drain-seconds", type=float, default=60)
+    paced.add_argument("--message-bytes", type=int, default=FLOOD_MESSAGE_BYTES)
     wait_replies = commands.add_parser("wait-replies")
     wait_replies.add_argument("conversation_id")
     wait_replies.add_argument("reply_count", type=int)
@@ -555,6 +565,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
                 arguments.duration_seconds,
                 [int(value) for value in arguments.snapshot_at.split(",") if value],
                 arguments.drain_seconds,
+                arguments.message_bytes,
             )
         elif arguments.command == "wait-replies":
             return await driver.wait_for_replies(

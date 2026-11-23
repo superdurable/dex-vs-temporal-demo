@@ -1,6 +1,6 @@
 {
   "schemaVersion": "2.0",
-  "generatedAt": "2026-11-23T08:43:31Z",
+  "generatedAt": "2026-11-23T09:26:13Z",
   "valid": true,
   "source": {
     "language": "python",
@@ -136,15 +136,15 @@
       }
     },
     {
-      "id": "decision:step:AnalyzeSentimentStep:107:16",
+      "id": "decision:step:AnalyzeSentimentStep:106:16",
       "kind": "decision",
       "name": "goToMany",
       "parentId": "step:AnalyzeSentimentStep",
       "phase": "execute",
       "span": {
-        "startLine": 107,
+        "startLine": 106,
         "startColumn": 16,
-        "endLine": 113,
+        "endLine": 112,
         "endColumn": 10
       },
       "decision": {
@@ -293,9 +293,9 @@
       "kind": "attribute",
       "name": "AssignedAgent",
       "span": {
-        "startLine": 59,
+        "startLine": 60,
         "startColumn": 1,
-        "endLine": 59,
+        "endLine": 60,
         "endColumn": 49
       },
       "resource": {
@@ -307,9 +307,9 @@
       "kind": "attribute",
       "name": "ConversationState",
       "span": {
-        "startLine": 58,
+        "startLine": 59,
         "startColumn": 1,
-        "endLine": 58,
+        "endLine": 59,
         "endColumn": 71
       },
       "resource": {
@@ -321,9 +321,9 @@
       "kind": "attribute",
       "name": "Summary",
       "span": {
-        "startLine": 60,
+        "startLine": 61,
         "startColumn": 1,
-        "endLine": 60,
+        "endLine": 61,
         "endColumn": 50
       },
       "resource": {
@@ -335,9 +335,9 @@
       "kind": "attribute",
       "name": "TranscriptChunks",
       "span": {
-        "startLine": 61,
+        "startLine": 62,
         "startColumn": 1,
-        "endLine": 61,
+        "endLine": 62,
         "endColumn": 70
       },
       "resource": {
@@ -350,9 +350,9 @@
       "kind": "channel",
       "name": "CustomerMessages",
       "span": {
-        "startLine": 57,
+        "startLine": 58,
         "startColumn": 1,
-        "endLine": 57,
+        "endLine": 58,
         "endColumn": 53
       },
       "resource": {
@@ -568,13 +568,13 @@
     {
       "id": "edge:0001",
       "kind": "transition",
-      "from": "decision:step:AnalyzeSentimentStep:107:16",
+      "from": "decision:step:AnalyzeSentimentStep:106:16",
       "to": "step:GenerateReplyStep",
       "label": "fan-out",
       "span": {
-        "startLine": 108,
+        "startLine": 107,
         "startColumn": 13,
-        "endLine": 112,
+        "endLine": 111,
         "endColumn": 14
       }
     },
@@ -705,9 +705,9 @@
       "to": "step:AnalyzeSentimentStep",
       "label": "get",
       "span": {
-        "startLine": 111,
+        "startLine": 110,
         "startColumn": 56,
-        "endLine": 111,
+        "endLine": 110,
         "endColumn": 87
       },
       "metadata": {
@@ -737,9 +737,9 @@
       "to": "step:GenerateReplyStep",
       "label": "get",
       "span": {
-        "startLine": 143,
+        "startLine": 142,
         "startColumn": 17,
-        "endLine": 143,
+        "endLine": 142,
         "endColumn": 48
       },
       "metadata": {
@@ -769,10 +769,10 @@
       "to": "step:GenerateReplyStep",
       "label": "get",
       "span": {
-        "startLine": 157,
-        "startColumn": 21,
-        "endLine": 157,
-        "endColumn": 41
+        "startLine": 153,
+        "startColumn": 23,
+        "endLine": 153,
+        "endColumn": 43
       },
       "metadata": {
         "phase": "execute"
@@ -801,9 +801,9 @@
       "to": "step:GenerateReplyStep",
       "label": "get",
       "span": {
-        "startLine": 145,
+        "startLine": 146,
         "startColumn": 20,
-        "endLine": 145,
+        "endLine": 146,
         "endColumn": 71
       },
       "metadata": {
@@ -955,10 +955,10 @@
       "to": "resource:attribute:SUMMARY",
       "label": "set",
       "span": {
-        "startLine": 154,
+        "startLine": 159,
         "startColumn": 13,
         "endLine": 159,
-        "endColumn": 14
+        "endColumn": 42
       },
       "metadata": {
         "phase": "execute"
@@ -971,10 +971,10 @@
       "to": "resource:attribute:TRANSCRIPT_CHUNKS",
       "label": "delete",
       "span": {
-        "startLine": 160,
-        "startColumn": 13,
-        "endLine": 160,
-        "endColumn": 76
+        "startLine": 158,
+        "startColumn": 17,
+        "endLine": 158,
+        "endColumn": 57
       },
       "metadata": {
         "phase": "execute"

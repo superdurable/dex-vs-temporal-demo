@@ -5,10 +5,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from dex import CodecRegistry
+
 CURRENT_CHUNK_TOKEN = "current"
 TRANSCRIPT_CHUNK_SIZE = 100
-RETAINED_ARCHIVED_CHUNKS = 100
 CHUNK_TOKEN_WIDTH = 20
+
+# Retention by size: archived chunks plus "current" stay within this many
+# serialized bytes. A run's active state budget is 64 MiB by default.
+TRANSCRIPT_BUDGET_BYTES = 32 * 1024 * 1024
+# Upper bound of what one reply appends: one customer message of at most
+# 8,192 characters (12 JSON bytes each at worst) plus the reply record.
+APPEND_HEADROOM_BYTES = 128 * 1024
+# Bounds the chunks one GenerateReplyStep execution loads to drop them.
+MAX_DROPPED_CHUNKS_PER_REPLY = 2
+# Same JSON text the SDK sends as the Attribute value.
+JSON_OBJECT_FRAMING_BYTES = len('{"records":[]}')
 
 ROLE_CUSTOMER = "customer"
 ROLE_ASSISTANT = "assistant"
@@ -57,6 +69,11 @@ class ConversationState:
     status: str = STATUS_WAITING
     customer_message_count: int = 0
     assistant_reply_count: int = 0
+    # Serialized bytes of each retained archived chunk, oldest first.
+    archived_chunk_bytes: list[int] = field(default_factory=list)
+    current_chunk_bytes: int = JSON_OBJECT_FRAMING_BYTES
+    # All retained archived chunks plus "current".
+    transcript_bytes: int = JSON_OBJECT_FRAMING_BYTES
 
     @property
     def record_count(self) -> int:
@@ -139,11 +156,42 @@ def count_retained_archived_chunks(state: ConversationState) -> int:
     return (newest - oldest) // TRANSCRIPT_CHUNK_SIZE + 1
 
 
-def next_evicted_chunk_token(state: ConversationState) -> str:
-    """Return the chunk the next archive would evict, or "" when there is room."""
-    if count_retained_archived_chunks(state) < RETAINED_ARCHIVED_CHUNKS:
-        return ""
-    return state.oldest_archived_chunk_token
+_TRANSCRIPT_RECORD_CODEC = CodecRegistry().resolve(TranscriptRecord)
+
+
+def encoded_record_bytes(record: TranscriptRecord) -> int:
+    """Return the UTF-8 bytes of the record's JSON as the SDK encodes it."""
+    return len(_TRANSCRIPT_RECORD_CODEC.encode(record).data.encode("utf-8"))
+
+
+def chunk_tokens_to_drop(state: ConversationState) -> list[str]:
+    """Return the oldest archived chunks the next reply drops to stay in budget.
+
+    The movement into the transcript writer loads exactly these chunks. The
+    newest archived chunk is never dropped.
+    """
+    over_budget_bytes = (
+        state.transcript_bytes + APPEND_HEADROOM_BYTES - TRANSCRIPT_BUDGET_BYTES
+    )
+    tokens: list[str] = []
+    for index, size in enumerate(state.archived_chunk_bytes[:-1]):
+        if over_budget_bytes <= 0 or len(tokens) == MAX_DROPPED_CHUNKS_PER_REPLY:
+            break
+        first_sequence = int(state.oldest_archived_chunk_token) + index * TRANSCRIPT_CHUNK_SIZE
+        tokens.append(archived_chunk_token(first_sequence))
+        over_budget_bytes -= size
+    return tokens
+
+
+def drop_oldest_archived_chunks(state: ConversationState, tokens: list[str]) -> None:
+    """Remove the dropped chunks, oldest first, from the retention bookkeeping."""
+    for token in tokens:
+        if token != state.oldest_archived_chunk_token:
+            raise ValueError(f'chunk "{token}" is not the oldest retained chunk')
+        state.transcript_bytes -= state.archived_chunk_bytes.pop(0)
+        state.oldest_archived_chunk_token = archived_chunk_token(
+            int(token) + TRANSCRIPT_CHUNK_SIZE
+        )
 
 
 @dataclass
@@ -153,7 +201,6 @@ class TranscriptAppend:
     current_chunk: TranscriptChunk
     archived_chunk_token: str = ""
     archived_chunk: TranscriptChunk | None = None
-    evicted_chunk_token: str = ""
 
 
 def append_records_to_chunk(
@@ -161,17 +208,22 @@ def append_records_to_chunk(
     current_chunk: TranscriptChunk,
     records: list[TranscriptRecord],
 ) -> TranscriptAppend:
-    """Assign sequences and append records; archive a full chunk; pick the chunk to evict.
+    """Assign sequences and append records; archive a full chunk; track sizes.
 
     Updates ``state`` in place. Takes at most TRANSCRIPT_CHUNK_SIZE records, so
-    it archives at most one chunk and evicts at most one chunk.
+    it archives at most one chunk.
     """
     if len(records) > TRANSCRIPT_CHUNK_SIZE:
         raise ValueError(f"at most {TRANSCRIPT_CHUNK_SIZE} records per append")
     result = TranscriptAppend(current_chunk)
     for record in records:
         record.sequence = state.next_sequence
+        record_bytes = encoded_record_bytes(record)
+        if result.current_chunk.records:
+            record_bytes += len(",")
         result.current_chunk.records.append(record)
+        state.current_chunk_bytes += record_bytes
+        state.transcript_bytes += record_bytes
         state.next_sequence += 1
         if record.role == ROLE_CUSTOMER:
             state.customer_message_count += 1
@@ -183,14 +235,12 @@ def append_records_to_chunk(
         result.archived_chunk_token = token
         result.archived_chunk = result.current_chunk
         result.current_chunk = TranscriptChunk()
+        state.archived_chunk_bytes.append(state.current_chunk_bytes)
+        state.current_chunk_bytes = JSON_OBJECT_FRAMING_BYTES
+        state.transcript_bytes += JSON_OBJECT_FRAMING_BYTES
         state.newest_archived_chunk_token = token
         if not state.oldest_archived_chunk_token:
             state.oldest_archived_chunk_token = token
-        if count_retained_archived_chunks(state) > RETAINED_ARCHIVED_CHUNKS:
-            result.evicted_chunk_token = state.oldest_archived_chunk_token
-            state.oldest_archived_chunk_token = archived_chunk_token(
-                int(result.evicted_chunk_token) + TRANSCRIPT_CHUNK_SIZE
-            )
     return result
 
 

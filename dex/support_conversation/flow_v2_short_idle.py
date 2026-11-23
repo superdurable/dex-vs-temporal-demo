@@ -48,7 +48,8 @@ from support_conversation.transcript import (
     TranscriptSummary,
     append_records_to_chunk,
     archived_chunk_token,
-    next_evicted_chunk_token,
+    chunk_tokens_to_drop,
+    drop_oldest_archived_chunks,
     parse_transcript_page_token,
 )
 
@@ -60,7 +61,7 @@ ASSIGNED_AGENT = Attribute("AssignedAgent", str)
 SUMMARY = Attribute("Summary", TranscriptSummary)
 TRANSCRIPT_CHUNKS = AttributeMap("TranscriptChunks", TranscriptChunk)
 
-MAX_MESSAGE_CHARACTERS = 4000
+MAX_MESSAGE_CHARACTERS = 8192
 MAX_AGENT_NAME_CHARACTERS = 200
 # Replaces the idle window from the start input for WaitForCustomerStep.
 IDLE_WINDOW = timedelta(seconds=10)
@@ -68,20 +69,18 @@ IDLE_WINDOW = timedelta(seconds=10)
 # --- Transcript chunk helpers ---
 # GenerateReplyStep is the only transcript writer, and Steps of one conversation
 # run one at a time, so no transcript chunk needs a lock. Every movement into
-# GenerateReplyStep carries options that also load the chunk it may evict.
+# GenerateReplyStep carries options that also load the chunks it will drop.
 
 
 def transcript_writer_step_options(state: ConversationState | None) -> StepOptions:
-    """Options of the transcript writer: load "current" and the chunk it may evict.
+    """Options of the transcript writer: load "current" and the chunks it will drop.
 
-    One execution appends at most TRANSCRIPT_CHUNK_SIZE records, so it archives
-    at most one chunk and evicts at most one chunk.
+    The chunks to drop follow from ConversationState alone, so the movement
+    and the execution choose the same ones.
     """
     loads: list[AttributeMapLoad] = [TRANSCRIPT_CHUNKS.load(CURRENT_CHUNK_TOKEN)]
     if state is not None:
-        evicted_token = next_evicted_chunk_token(state)
-        if evicted_token:
-            loads.append(TRANSCRIPT_CHUNKS.load(evicted_token))
+        loads.extend(TRANSCRIPT_CHUNKS.load(token) for token in chunk_tokens_to_drop(state))
     return StepOptions(execute_load_attribute_map_instances=tuple(loads))
 
 
@@ -141,6 +140,8 @@ class GenerateReplyStep(Step[ReplyRequest]):
             )
         )
         state = CONVERSATION_STATE.get(context)
+        # Loaded through the movement options built by transcript_writer_step_options.
+        dropped_tokens = chunk_tokens_to_drop(state)
         appended = append_records_to_chunk(
             state, TRANSCRIPT_CHUNKS.get(context, CURRENT_CHUNK_TOKEN), records
         )
@@ -148,16 +149,15 @@ class GenerateReplyStep(Step[ReplyRequest]):
             TRANSCRIPT_CHUNKS.set(
                 context, appended.archived_chunk_token, appended.archived_chunk
             )
-        if appended.evicted_chunk_token:
-            # Loaded through the movement options built by transcript_writer_step_options.
-            evicted_chunk = TRANSCRIPT_CHUNKS.get(context, appended.evicted_chunk_token)
-            SUMMARY.set(
-                context,
-                self.summarizer.fold_chunk_into_summary(
-                    SUMMARY.get(context), evicted_chunk
-                ),
-            )
-            TRANSCRIPT_CHUNKS.delete(context, appended.evicted_chunk_token)
+        if dropped_tokens:
+            summary = SUMMARY.get(context)
+            for token in dropped_tokens:
+                summary = self.summarizer.fold_chunk_into_summary(
+                    summary, TRANSCRIPT_CHUNKS.get(context, token)
+                )
+                TRANSCRIPT_CHUNKS.delete(context, token)
+            SUMMARY.set(context, summary)
+            drop_oldest_archived_chunks(state, dropped_tokens)
         TRANSCRIPT_CHUNKS.set(context, CURRENT_CHUNK_TOKEN, appended.current_chunk)
         state.status = STATUS_WAITING
         CONVERSATION_STATE.set(context, state)
