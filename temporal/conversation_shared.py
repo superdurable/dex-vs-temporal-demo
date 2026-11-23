@@ -1,4 +1,4 @@
-"""Types and pure helpers shared by both conversation workflow variants.
+"""Types and pure helpers shared by the conversation workflow variants.
 
 This module has no side effects, so it is safe to import inside the
 Temporal workflow sandbox.
@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 TASK_QUEUE = "conversation-demo"
 NAIVE_WORKFLOW_TYPE = "NaiveConversationWorkflow"
 CORRECT_WORKFLOW_TYPE = "ConversationWorkflow"
-CONTINUE_AS_NEW_WORKFLOW_TYPE = "ConversationWorkflowWithContinueAsNew"
+INLINE_TRANSCRIPT_WORKFLOW_TYPE = "ConversationWorkflowContinueAsNewInlineTranscript"
 SENTIMENT_PATCH_ID = "analyze-sentiment-before-reply"
 
 DEFAULT_IDLE_SECONDS = 600

@@ -2,7 +2,8 @@
 
 generate_reply is a deterministic local mock. The outbox activities append a
 single JSON line to the shared demo outbox file instead of calling a real
-provider.
+provider. The outbox is a demo file: a retried activity can append a
+duplicate line, where a real provider call would use an idempotency key.
 """
 
 from __future__ import annotations
@@ -22,6 +23,10 @@ TOOL_CALLS_BY_KEYWORD = (
     ("refund", "check_refund_policy"),
     ("deliver", "track_shipment"),
 )
+REPLY_OPENING_BY_SENTIMENT = {
+    "negative": "I am sorry for the trouble. ",
+    "neutral": "Thanks for reaching out. ",
+}
 
 OUTBOX_DIRECTORY = Path(
     os.environ.get("DEMO_OUTBOX_DIR", "/tmp/dex-vs-temporal-demo/outbox")
@@ -49,8 +54,10 @@ async def generate_reply(request: ReplyRequest) -> GeneratedReply:
     tool_calls = [
         tool for keyword, tool in TOOL_CALLS_BY_KEYWORD if keyword in lowered_text
     ] or ["lookup_customer"]
+    # Empty when the workflow did not analyze sentiment; replies then match v1.
+    opening = REPLY_OPENING_BY_SENTIMENT.get(request.sentiment, "")
     reply = (
-        f"Reply to message {request.customer_sequence}: I checked "
+        f"Reply to message {request.customer_sequence}: {opening}I checked "
         f"{', '.join(tool_calls)} for you. Your request is on file and a "
         "support specialist will follow up shortly. Is there anything else "
         "I can help you with today? "

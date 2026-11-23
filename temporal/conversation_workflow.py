@@ -59,13 +59,8 @@ class ConversationWorkflow:
             await self._answer_inbox()
 
             # Re-armed after every reply; a new message wakes it early.
-            try:
-                await workflow.wait_condition(
-                    lambda: bool(self._inbox), timeout=self._idle_window
-                )
+            if await self._message_arrives_within(self._idle_window):
                 continue
-            except asyncio.TimeoutError:
-                pass
 
             self._status = STATUS_NUDGED
             await workflow.execute_activity(
@@ -73,21 +68,32 @@ class ConversationWorkflow:
                 OutboxRequest(self._conversation_id, len(self._transcript)),
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
             )
-            try:
-                await workflow.wait_condition(
-                    lambda: bool(self._inbox), timeout=self._close_after
-                )
+            if await self._message_arrives_within(self._close_after):
                 self._status = STATUS_OPEN
-            except asyncio.TimeoutError:
-                break
+                continue
 
-        self._status = STATUS_CLOSED
-        await workflow.execute_activity(
-            post_close_summary,
-            OutboxRequest(self._conversation_id, len(self._transcript)),
-            start_to_close_timeout=ACTIVITY_TIMEOUT,
-        )
-        return self.get_summary()
+            self._status = STATUS_CLOSED
+            await workflow.execute_activity(
+                post_close_summary,
+                OutboxRequest(self._conversation_id, len(self._transcript)),
+                start_to_close_timeout=ACTIVITY_TIMEOUT,
+            )
+            # A message accepted while the summary was posted reopens the conversation.
+            if self._inbox:
+                self._status = STATUS_OPEN
+                continue
+            return self.get_summary()
+
+    async def _message_arrives_within(self, window: timedelta) -> bool:
+        """Returns True when the inbox holds a message, False when window ends first.
+
+        A message that arrives in the same workflow task as the timer wins.
+        """
+        try:
+            await workflow.wait_condition(lambda: bool(self._inbox), timeout=window)
+        except asyncio.TimeoutError:
+            pass
+        return bool(self._inbox)
 
     async def _answer_inbox(self) -> None:
         # One reply per customer message, in arrival order.

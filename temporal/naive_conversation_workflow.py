@@ -1,6 +1,11 @@
-"""AI support conversation workflow with the idle timer written the way most
-people first write it: the message handler replies and sets a nudge_at
+"""AI support conversation workflow with the idle timer written as a plausible
+first implementation: the message handler replies and sets a nudge_at
 field, and run sleeps once until nudge_at.
+
+Only the idle timer is naive on purpose: the sleep is computed once, so a
+reply that moves nudge_at does not move a sleep that already started. A
+message accepted while the nudge or the close summary is sent is still
+answered and keeps the conversation open.
 """
 
 from __future__ import annotations
@@ -56,6 +61,8 @@ class NaiveConversationWorkflow:
             # Sleep until the nudge time set after the latest reply.
             await asyncio.sleep(self._seconds_until(self._nudge_at))
             self._status = STATUS_NUDGED
+            # Counted before the nudge, so a message sent during it keeps the conversation open.
+            messages_at_nudge = len(self._transcript)
             await workflow.execute_activity(
                 send_nudge_email,
                 OutboxRequest(self._conversation_id, len(self._transcript)),
@@ -63,20 +70,26 @@ class NaiveConversationWorkflow:
             )
 
             # Close the conversation if the customer stays silent.
-            messages_at_nudge = len(self._transcript)
             await asyncio.sleep(self._close_after.total_seconds())
-            if len(self._transcript) == messages_at_nudge:
-                break
-            self._status = STATUS_OPEN
+            if len(self._transcript) != messages_at_nudge:
+                # Its reply sets the next nudge_at.
+                await workflow.wait_condition(workflow.all_handlers_finished)
+                self._status = STATUS_OPEN
+                continue
 
-        await workflow.wait_condition(workflow.all_handlers_finished)
-        self._status = STATUS_CLOSED
-        await workflow.execute_activity(
-            post_close_summary,
-            OutboxRequest(self._conversation_id, len(self._transcript)),
-            start_to_close_timeout=ACTIVITY_TIMEOUT,
-        )
-        return self.get_summary()
+            await workflow.wait_condition(workflow.all_handlers_finished)
+            self._status = STATUS_CLOSED
+            messages_at_close = len(self._transcript)
+            await workflow.execute_activity(
+                post_close_summary,
+                OutboxRequest(self._conversation_id, len(self._transcript)),
+                start_to_close_timeout=ACTIVITY_TIMEOUT,
+            )
+            # A message accepted while the summary was posted reopens the conversation.
+            await workflow.wait_condition(workflow.all_handlers_finished)
+            if len(self._transcript) == messages_at_close:
+                return self.get_summary()
+            self._status = STATUS_OPEN
 
     @workflow.signal
     async def post_message(self, text: str) -> None:
