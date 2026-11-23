@@ -31,25 +31,31 @@ run_variant() {
   local expected="$2"
   local conversation_id="t1-$variant-$(date +%Y%m%d-%H%M%S)"
   echo
-  echo "=== $variant variant: $conversation_id (idle ${IDLE_SECONDS}s, close after ${CLOSE_AFTER_SECONDS}s more, one customer message at t=${POST_AT_SECONDS}s)"
+  echo "=== $variant variant: $conversation_id (idle ${IDLE_SECONDS}s, close after ${CLOSE_AFTER_SECONDS}s more, follow-up at t=${POST_AT_SECONDS}s)"
   local start_epoch post_epoch
   start_epoch="$(epoch_now)"
   drive start "$conversation_id" --variant "$variant" \
+    --first-message "Hi, my order has not arrived yet." \
     --idle-seconds "$IDLE_SECONDS" --close-after-seconds "$CLOSE_AFTER_SECONDS" >/dev/null
   sleep_until_epoch "$(python3 -c "print($start_epoch + $POST_AT_SECONDS)")"
   post_epoch="$(epoch_now)"
-  drive post "$conversation_id" "Hi, is there any update on my order?" >/dev/null
+  drive post "$conversation_id" "Is there any update on the delivery?" >/dev/null
   wait_for_close_summary "$conversation_id"
-  local reply_epoch
-  reply_epoch="$(drive page "$conversation_id" current | uv run --quiet --project "$TEMPORAL_APP_DIR" python -c '
+  local reply_marks=()
+  local reply_mark
+  while IFS= read -r reply_mark; do
+    reply_marks+=("$reply_mark")
+  done < <(drive page "$conversation_id" current | uv run --quiet --project "$TEMPORAL_APP_DIR" python -c '
 import datetime, json, sys
 records = [r for r in json.load(sys.stdin)["messages"] if r["role"] == "assistant"]
-print(datetime.datetime.fromisoformat(records[-1]["time"]).timestamp() if records else "")')"
+for number, record in enumerate(reversed(records), 1):
+    epoch = datetime.datetime.fromisoformat(record["time"]).timestamp()
+    print(f"AI reply {number} recorded={epoch}")')
   uv run --quiet --project "$TEMPORAL_APP_DIR" python "$TEMPORAL_APP_DIR/outbox_timeline.py" \
-    "$conversation_id" "$start_epoch" "customer message posted=$post_epoch" \
-    ${reply_epoch:+"AI reply recorded=$reply_epoch"}
+    "$conversation_id" "$start_epoch" "customer follow-up posted=$post_epoch" \
+    ${reply_marks[@]+"${reply_marks[@]}"}
   echo "  expected: $expected"
 }
 
-run_variant naive "nudge at about t=30s (the reply at t=20s did not re-arm the timer), close at about t=60s"
-run_variant correct "nudge at about t=50s plus reply time (idle window restarted after the reply), close at about t=80s"
+run_variant naive "nudge at about t=30s (30 s after the first reply; the follow-up reply did not re-arm the sleep), close at about t=60s"
+run_variant correct "nudge at about t=50s (30 s after the second reply), close at about t=80s"

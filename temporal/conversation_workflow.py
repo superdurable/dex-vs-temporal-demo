@@ -45,30 +45,41 @@ class ConversationWorkflow:
         self._idle_window = timedelta(seconds=input.idle_seconds)
         self._close_after = timedelta(seconds=input.close_after_seconds)
         self._transcript: list[TranscriptMessage] = []
-        self._unanswered_messages: deque[TranscriptMessage] = deque()
+        self._inbox: deque[TranscriptMessage] = deque()
         self._agent = ""
         self._status = STATUS_OPEN
+        if input.first_message:
+            self._inbox.append(self._append_record(ROLE_CUSTOMER, input.first_message))
 
     @workflow.run
     async def run(self, input: ConversationInput) -> ConversationSummary:
+        # No idle timer before the first reply.
+        await workflow.wait_condition(lambda: bool(self._inbox))
         while True:
-            await self._reply_until_idle()
+            await self._answer_inbox()
+
+            # Re-armed after every reply; a new message wakes it early.
+            try:
+                await workflow.wait_condition(
+                    lambda: bool(self._inbox), timeout=self._idle_window
+                )
+                continue
+            except asyncio.TimeoutError:
+                pass
+
             self._status = STATUS_NUDGED
             await workflow.execute_activity(
                 send_nudge_email,
                 OutboxRequest(self._conversation_id, len(self._transcript)),
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
             )
-
-            # Any customer message before the close reopens the conversation.
             try:
                 await workflow.wait_condition(
-                    lambda: bool(self._unanswered_messages),
-                    timeout=self._close_after,
+                    lambda: bool(self._inbox), timeout=self._close_after
                 )
+                self._status = STATUS_OPEN
             except asyncio.TimeoutError:
                 break
-            self._status = STATUS_OPEN
 
         self._status = STATUS_CLOSED
         await workflow.execute_activity(
@@ -78,22 +89,10 @@ class ConversationWorkflow:
         )
         return self.get_summary()
 
-    async def _reply_until_idle(self) -> None:
-        while True:
-            await self._reply_to_unanswered_messages()
-            # Re-arm the idle timer after the reply; a new message wakes it early.
-            try:
-                await workflow.wait_condition(
-                    lambda: bool(self._unanswered_messages),
-                    timeout=self._idle_window,
-                )
-            except asyncio.TimeoutError:
-                return
-
-    async def _reply_to_unanswered_messages(self) -> None:
+    async def _answer_inbox(self) -> None:
         # One reply per customer message, in arrival order.
-        while self._unanswered_messages:
-            customer_message = self._unanswered_messages.popleft()
+        while self._inbox:
+            customer_message = self._inbox.popleft()
             reply = await workflow.execute_activity(
                 generate_reply,
                 ReplyRequest(
@@ -120,7 +119,7 @@ class ConversationWorkflow:
 
     @workflow.signal
     def post_message(self, text: str) -> None:
-        self._unanswered_messages.append(self._append_record(ROLE_CUSTOMER, text))
+        self._inbox.append(self._append_record(ROLE_CUSTOMER, text))
 
     @workflow.update
     def assign_agent(self, name: str) -> str:
@@ -139,5 +138,5 @@ class ConversationWorkflow:
             self._status,
             self._agent,
             self._transcript,
-            len(self._unanswered_messages),
+            len(self._inbox),
         )

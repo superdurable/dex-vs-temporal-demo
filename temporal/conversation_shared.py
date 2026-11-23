@@ -29,6 +29,7 @@ STATUS_CLOSED = "closed"
 @dataclass
 class ConversationInput:
     conversation_id: str
+    first_message: str
     idle_seconds: int = DEFAULT_IDLE_SECONDS
     close_after_seconds: int = DEFAULT_CLOSE_AFTER_SECONDS
 

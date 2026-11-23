@@ -24,6 +24,7 @@ conversation_id="t5-flood-$(date +%Y%m%d-%H%M%S)"
   echo "=== T5 flood: $conversation_id (correct variant, idle ${IDLE_SECONDS}s, count $COUNT, rate ${RATE} msg/s, 0 = unthrottled)"
   echo "server: temporal server start-dev with no dynamic config overrides for per-execution limits"
   drive start "$conversation_id" --variant correct \
+    --first-message "Hi, I need help with my order." \
     --idle-seconds "$IDLE_SECONDS" --close-after-seconds "$IDLE_SECONDS"
   drive assign "$conversation_id" "Avery"
   wall_start="$(epoch_now)"

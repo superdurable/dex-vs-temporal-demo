@@ -1,12 +1,12 @@
 """AI support conversation workflow with the idle timer written the way most
-people first write it: compute the delay, sleep once, and let the message
-handler move a deadline field after it replies.
+people first write it: the message handler replies and sets a nudge_at
+field, and run sleeps once until nudge_at.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from temporalio import workflow
 
@@ -42,16 +42,19 @@ class NaiveConversationWorkflow:
         self._transcript: list[TranscriptMessage] = []
         self._agent = ""
         self._status = STATUS_OPEN
-        self._idle_deadline = workflow.now() + self._idle_window
+        self._nudge_at: datetime | None = None
         # Replies are generated one at a time, in message order.
         self._reply_lock = asyncio.Lock()
         self._pending_reply_count = 0
 
     @workflow.run
     async def run(self, input: ConversationInput) -> ConversationSummary:
+        if input.first_message:
+            await self._reply_to_customer(input.first_message)
         while True:
-            # Wait until the conversation has been idle for the idle window.
-            await asyncio.sleep(self._seconds_until_idle_deadline())
+            await workflow.wait_condition(lambda: self._nudge_at is not None)
+            # Sleep until the nudge time set after the latest reply.
+            await asyncio.sleep(self._seconds_until(self._nudge_at))
             self._status = STATUS_NUDGED
             await workflow.execute_activity(
                 send_nudge_email,
@@ -77,6 +80,9 @@ class NaiveConversationWorkflow:
 
     @workflow.signal
     async def post_message(self, text: str) -> None:
+        await self._reply_to_customer(text)
+
+    async def _reply_to_customer(self, text: str) -> None:
         customer_message = self._append_record(ROLE_CUSTOMER, text)
         self._pending_reply_count += 1
         async with self._reply_lock:
@@ -92,7 +98,7 @@ class NaiveConversationWorkflow:
             self._append_record(ROLE_ASSISTANT, reply.text, reply.tool_calls)
             self._pending_reply_count -= 1
             # The idle window restarts once the customer has the reply.
-            self._idle_deadline = workflow.now() + self._idle_window
+            self._nudge_at = workflow.now() + self._idle_window
 
     def _append_record(
         self, role: str, text: str, tool_calls: list[str] | None = None
@@ -107,8 +113,8 @@ class NaiveConversationWorkflow:
         self._transcript.append(record)
         return record
 
-    def _seconds_until_idle_deadline(self) -> float:
-        return max(0.0, (self._idle_deadline - workflow.now()).total_seconds())
+    def _seconds_until(self, moment: datetime) -> float:
+        return max(0.0, (moment - workflow.now()).total_seconds())
 
     @workflow.update
     def assign_agent(self, name: str) -> str:

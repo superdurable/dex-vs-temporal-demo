@@ -1,7 +1,7 @@
 """Command-line driver for the Temporal conversation demo.
 
 Usage (from this directory):
-  uv run drive.py start <conversation-id> [--variant naive|correct] [--idle-seconds N] [--close-after-seconds N]
+  uv run drive.py start <conversation-id> --first-message <text> [--variant naive|correct] [--idle-seconds N] [--close-after-seconds N]
   uv run drive.py post <conversation-id> <text>
   uv run drive.py assign <conversation-id> <agent-name>
   uv run drive.py page <conversation-id> [token]
@@ -49,7 +49,11 @@ FLOOD_BACKLOG_TIMEOUT_SECONDS = 900
 
 
 async def connect_client() -> Client:
-    return await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
+    # A fixed identity keeps the host name out of recorded histories.
+    return await Client.connect(
+        os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"),
+        identity=os.environ.get("DEMO_CLIENT_IDENTITY", "conversation-demo-driver"),
+    )
 
 
 def print_json(value: Any) -> None:
@@ -61,7 +65,10 @@ async def start_conversation(client: Client, args: argparse.Namespace) -> None:
     handle = await client.start_workflow(
         workflow_type,
         ConversationInput(
-            args.conversation_id, args.idle_seconds, args.close_after_seconds
+            args.conversation_id,
+            args.first_message,
+            args.idle_seconds,
+            args.close_after_seconds,
         ),
         id=args.conversation_id,
         task_queue=TASK_QUEUE,
@@ -250,6 +257,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     start = commands.add_parser("start", help="start a conversation workflow")
     start.add_argument("conversation_id")
+    start.add_argument(
+        "--first-message", required=True, help="the customer message that opens the conversation"
+    )
     start.add_argument("--variant", choices=sorted(WORKFLOW_TYPE_BY_VARIANT), default="correct")
     start.add_argument("--idle-seconds", type=int, default=DEFAULT_IDLE_SECONDS)
     start.add_argument(

@@ -21,10 +21,13 @@ from naive_conversation_workflow import NaiveConversationWorkflow
 
 async def run_worker() -> None:
     address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    client = await Client.connect(address)
+    # A fixed identity keeps the host name out of recorded histories.
+    identity = os.environ.get("DEMO_WORKER_IDENTITY", "conversation-demo-worker")
+    client = await Client.connect(address, identity=identity)
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
+        identity=identity,
         workflows=[NaiveConversationWorkflow, ConversationWorkflow],
         activities=[generate_reply, send_nudge_email, post_close_summary],
     )
