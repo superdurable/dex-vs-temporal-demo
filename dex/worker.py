@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import signal
 from pathlib import Path
 
@@ -28,7 +29,11 @@ async def run_worker() -> None:
         cache,
         WorkerOptions(
             server_address=server_address,
-            pull=PullWorkerOptions(max_concurrent_tasks=32),
+            pull=PullWorkerOptions(
+                max_concurrent_tasks=32,
+                # The default identity includes the machine host name, which Dex Web shows.
+                app_worker_id=f"demo-worker-{secrets.token_hex(4)}",
+            ),
             # Regenerate after Flow changes: dexcli visualize support_conversation/flow.py
             # --schema-version 2.0 --json --out flow-definitions/SupportConversationFlow
             flow_definition_paths=(str(FLOW_DEFINITIONS_DIRECTORY),),
