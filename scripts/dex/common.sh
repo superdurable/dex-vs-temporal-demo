@@ -48,23 +48,31 @@ start_dex_dev() {
   exit 1
 }
 
+# SUPPORT_FLOW_VERSION (v1, v2, v2-short-idle) selects the Flow code of the
+# Worker and the driver; each version writes its own Worker log.
+worker_log_path() { echo "$RUN_DIR/worker-${SUPPORT_FLOW_VERSION:-v1}.log"; }
+
 start_worker() {
   if is_pid_alive "$WORKER_PID_FILE"; then
     log "Worker already running (pid $(cat "$WORKER_PID_FILE"))"
     return
   fi
+  local worker_log
+  worker_log="$(worker_log_path)"
   (cd "$DEX_APP_DIR" && uv sync -q)
-  log "starting the Worker"
+  log "starting the Worker with Flow code ${SUPPORT_FLOW_VERSION:-v1}"
   # Redirect the whole subshell so it never holds the caller's stdout pipe.
-  (cd "$DEX_APP_DIR" && exec uv run python worker.py) >"$RUN_DIR/worker.log" 2>&1 </dev/null &
+  (cd "$DEX_APP_DIR" && exec uv run python worker.py) >"$worker_log" 2>&1 </dev/null &
   echo $! >"$WORKER_PID_FILE"
   for _ in $(seq 1 60); do
-    grep -q "worker ready" "$RUN_DIR/worker.log" 2>/dev/null && { log "Worker is ready"; return; }
+    grep -q "worker ready" "$worker_log" 2>/dev/null && { log "Worker is ready"; return; }
     sleep 1
   done
-  log "Worker did not become ready; see $RUN_DIR/worker.log"
+  log "Worker did not become ready; see $worker_log"
   exit 1
 }
+
+stop_worker() { stop_pid_file "$WORKER_PID_FILE" "Worker"; }
 
 stop_pid_file() {
   local pid_file="$1" name="$2"

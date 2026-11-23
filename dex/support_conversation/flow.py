@@ -60,9 +60,6 @@ TRANSCRIPT_CHUNKS = AttributeMap("TranscriptChunks", TranscriptChunk)
 
 MAX_MESSAGE_CHARACTERS = 4000
 MAX_AGENT_NAME_CHARACTERS = 200
-# One GenerateReplyStep execution appends the messages plus one reply, so it
-# never appends more than one chunk of records.
-MAX_MESSAGES_PER_REPLY = TRANSCRIPT_CHUNK_SIZE - 1
 
 # --- Transcript chunk helpers ---
 # GenerateReplyStep is the only transcript writer, and Steps of one conversation
@@ -94,7 +91,7 @@ def utc_timestamp() -> str:
 
 
 # dex:group group-id:conversation group-label:"Conversation"
-# dex:explanation text:"Answer the queued customer messages with the model and its tools, and record messages and reply."
+# dex:explanation text:"Answer one customer message with the model and its tools, and record the message and the reply."
 class GenerateReplyStep(Step[ReplyRequest]):
     def __init__(
         self, reply_generator: ReplyGenerator, summarizer: TranscriptSummarizer
@@ -148,8 +145,9 @@ class GenerateReplyStep(Step[ReplyRequest]):
 class WaitForCustomerStep(Step[ConversationSettings]):
     def wait_for(self, context: Context, input: ConversationSettings) -> Wait:
         # The Channel is declared first, so queued messages win over a due Timer.
+        # One message per reply: each customer message gets its own answer.
         return Wait.any_of(
-            CUSTOMER_MESSAGES.for_range(at_least=1, at_most=MAX_MESSAGES_PER_REPLY),
+            CUSTOMER_MESSAGES.for_one(),
             Timer.by_duration(timedelta(seconds=input.idle_seconds)),
         )
 
@@ -186,7 +184,7 @@ class NudgeCustomerStep(Step[ConversationSettings]):
 class WaitAfterNudgeStep(Step[ConversationSettings]):
     def wait_for(self, context: Context, input: ConversationSettings) -> Wait:
         return Wait.any_of(
-            CUSTOMER_MESSAGES.for_range(at_least=1, at_most=MAX_MESSAGES_PER_REPLY),
+            CUSTOMER_MESSAGES.for_one(),
             Timer.by_duration(timedelta(seconds=input.close_after_seconds)),
         )
 

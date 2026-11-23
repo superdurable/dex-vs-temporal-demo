@@ -13,6 +13,7 @@ from dex import AsyncWorker, PullWorkerOptions, WorkerOptions
 from support_conversation.app import (
     build_registry,
     build_support_conversation_flow,
+    flow_version_from_environment,
     open_process_blob_cache,
     server_address_from_environment,
 )
@@ -22,8 +23,9 @@ FLOW_DEFINITIONS_DIRECTORY = Path(__file__).resolve().parent / "flow-definitions
 
 async def run_worker() -> None:
     server_address = server_address_from_environment()
+    flow_version = flow_version_from_environment()
     cache, _ = open_process_blob_cache("worker")
-    registry = build_registry(build_support_conversation_flow())
+    registry = build_registry(build_support_conversation_flow(flow_version))
     worker = AsyncWorker(
         registry,
         cache,
@@ -32,11 +34,12 @@ async def run_worker() -> None:
             pull=PullWorkerOptions(
                 max_concurrent_tasks=32,
                 # The default identity includes the machine host name, which Dex Web shows.
-                app_worker_id=f"demo-worker-{secrets.token_hex(4)}",
+                # The Flow code version in the ID shows in history which code ran a Step.
+                app_worker_id=f"demo-worker-{flow_version}-{secrets.token_hex(4)}",
             ),
             # Regenerate after Flow changes: dexcli visualize support_conversation/flow.py
-            # --schema-version 2.0 --json --out flow-definitions/SupportConversationFlow
-            flow_definition_paths=(str(FLOW_DEFINITIONS_DIRECTORY),),
+            # --schema-version 2.0 --json --out flow-definitions/v1/SupportConversationFlow
+            flow_definition_paths=(str(FLOW_DEFINITIONS_DIRECTORY / flow_version),),
         ),
     )
     shutdown_requested = asyncio.Event()
@@ -46,7 +49,7 @@ async def run_worker() -> None:
     worker_task = asyncio.create_task(worker.start())
     try:
         await worker.wait_pull_registered(timeout=30)
-        print(f"worker ready on {server_address}", flush=True)
+        print(f"worker ready on {server_address} with Flow code {flow_version}", flush=True)
         await shutdown_requested.wait()
     finally:
         await worker.close()

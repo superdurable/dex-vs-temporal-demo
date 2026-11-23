@@ -6,6 +6,10 @@
   page <conversation-id> [token]
   status <conversation-id>
   flood <conversation-id> --count N [--rate R] [--concurrency C]
+  paced <conversation-id> --rate R --duration-seconds S [--snapshot-at N,M] [--drain-seconds S]
+  wait-replies <conversation-id> <reply-count> [--timeout-seconds S]
+
+SUPPORT_FLOW_VERSION (v1, v2, v2-short-idle) selects the Flow code; v1 is the default.
 """
 
 from __future__ import annotations
@@ -39,15 +43,10 @@ from dex import (
 from support_conversation.app import (
     build_registry,
     build_support_conversation_flow,
+    flow_version_from_environment,
+    import_flow_module,
     open_process_blob_cache,
     server_address_from_environment,
-)
-from support_conversation.flow import (
-    ASSIGNED_AGENT,
-    CONVERSATION_STATE,
-    SUMMARY,
-    TRANSCRIPT_CHUNKS,
-    SupportConversationFlow,
 )
 from support_conversation.transcript import (
     CURRENT_CHUNK_TOKEN,
@@ -59,8 +58,17 @@ from support_conversation.transcript import (
     parse_transcript_page_token,
 )
 
+FLOW_VERSION = flow_version_from_environment()
+FLOW_MODULE = import_flow_module(FLOW_VERSION)
+ASSIGNED_AGENT = FLOW_MODULE.ASSIGNED_AGENT
+CONVERSATION_STATE = FLOW_MODULE.CONVERSATION_STATE
+SUMMARY = FLOW_MODULE.SUMMARY
+TRANSCRIPT_CHUNKS = FLOW_MODULE.TRANSCRIPT_CHUNKS
+
 FLOOD_MESSAGE_BYTES = 200
 FLOOD_PROGRESS_EVERY = 1000
+PACED_PROGRESS_SECONDS = 60
+PACED_MAX_IN_FLIGHT = 64
 
 
 def print_json(value: object) -> None:
@@ -80,7 +88,7 @@ def describe_error(error: BaseException) -> dict[str, Any]:
 
 
 class SupportConversationDriver:
-    def __init__(self, client: AsyncClient, flow: SupportConversationFlow) -> None:
+    def __init__(self, client: AsyncClient, flow: Any) -> None:
         self.client = client
         self.flow = flow
 
@@ -163,7 +171,7 @@ class SupportConversationDriver:
             "newestArchivedChunkToken": state.newest_archived_chunk_token,
             "assignedAgent": values.get(ASSIGNED_AGENT),
             "summary": asdict(summary) if summary is not None else None,
-            "historyEventCount": read_history_event_count(conversation_id),
+            "history": read_history_event_summary(conversation_id),
         }
 
     async def flood(
@@ -273,6 +281,143 @@ class SupportConversationDriver:
             await asyncio.sleep(1)
         return None
 
+    async def wait_for_replies(
+        self, conversation_id: str, reply_count: int, timeout_seconds: float
+    ) -> int:
+        """Wait until the conversation has reply_count replies; print the newest records."""
+        started = time.monotonic()
+        while True:
+            values = await self.client.get_attributes(conversation_id, CONVERSATION_STATE)
+            state = values.get(CONVERSATION_STATE) or ConversationState()
+            elapsed = round(time.monotonic() - started, 1)
+            if state.assistant_reply_count >= reply_count:
+                page = await self.read_page(conversation_id, CURRENT_CHUNK_TOKEN)
+                print_json(
+                    {
+                        "conversation": conversation_id,
+                        "replies": state.assistant_reply_count,
+                        "waitedSeconds": elapsed,
+                        "newestTwoRecords": page["records"][:2],
+                    }
+                )
+                return 0
+            if elapsed > timeout_seconds:
+                print_json(
+                    {
+                        "conversation": conversation_id,
+                        "error": f"{state.assistant_reply_count} of {reply_count} replies after {timeout_seconds}s",
+                    }
+                )
+                return 1
+            await asyncio.sleep(0.2)
+
+    async def post_at_fixed_rate(
+        self,
+        conversation_id: str,
+        rate: float,
+        duration_seconds: float,
+        snapshot_thresholds: list[int],
+        drain_seconds: float,
+    ) -> int:
+        """Post rate messages per second for duration_seconds, then drain briefly.
+
+        Each post starts at its own slot, so a slow RPC does not slow the rate.
+        A snapshot is taken when the accepted count first reaches each threshold.
+        """
+        baseline = await self.client.get_attributes(conversation_id, CONVERSATION_STATE)
+        baseline_customers = (
+            baseline.get(CONVERSATION_STATE) or ConversationState()
+        ).customer_message_count
+        total = int(rate * duration_seconds)
+        started = time.monotonic()
+        accepted = 0
+        failure: BaseException | None = None
+        stop = asyncio.Event()
+        in_flight = asyncio.Semaphore(PACED_MAX_IN_FLIGHT)
+        snapshots: list[dict[str, Any]] = []
+
+        async def post_one(index: int) -> None:
+            nonlocal accepted, failure
+            try:
+                await self.client.invoke_rpc(
+                    self.flow.post_message, conversation_id, flood_message_text(index)
+                )
+                accepted += 1
+            except Exception as error:  # report the exact engine rejection
+                if failure is None:
+                    failure = error
+                stop.set()
+            finally:
+                in_flight.release()
+
+        async def post_on_schedule() -> None:
+            posts: list[asyncio.Task[None]] = []
+            for index in range(total):
+                delay = started + index / rate - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                if stop.is_set():
+                    break
+                await in_flight.acquire()
+                posts.append(asyncio.create_task(post_one(index)))
+            await asyncio.gather(*posts)
+
+        async def read_progress() -> dict[str, Any]:
+            values = await self.client.get_attributes(conversation_id, CONVERSATION_STATE)
+            state = values.get(CONVERSATION_STATE) or ConversationState()
+            return {
+                "elapsedSeconds": round(time.monotonic() - started, 1),
+                "accepted": accepted,
+                "customerRecorded": state.customer_message_count - baseline_customers,
+                "replies": state.assistant_reply_count,
+                "backlog": baseline_customers + accepted - state.customer_message_count,
+            }
+
+        async def report_until_stopped() -> None:
+            pending_thresholds = sorted(snapshot_thresholds)
+            last_report = 0.0
+            while not stop.is_set():
+                await asyncio.sleep(1)
+                if pending_thresholds and accepted >= pending_thresholds[0]:
+                    threshold = pending_thresholds.pop(0)
+                    snapshot = {"threshold": threshold, **await read_progress()}
+                    snapshot["flowStatus"] = (
+                        await self.client.describe_flow(conversation_id)
+                    ).status.name
+                    snapshot["history"] = await asyncio.to_thread(
+                        read_history_event_summary, conversation_id
+                    )
+                    snapshots.append(snapshot)
+                    print_json({"snapshot": snapshot})
+                if time.monotonic() - last_report >= PACED_PROGRESS_SECONDS:
+                    last_report = time.monotonic()
+                    print_json({"progress": await read_progress()})
+
+        reporter = asyncio.create_task(report_until_stopped())
+        await post_on_schedule()
+        posting_seconds = time.monotonic() - started
+        drain_started = time.monotonic()
+        while time.monotonic() - drain_started < drain_seconds:
+            if (await read_progress())["backlog"] <= 0:
+                break
+            await asyncio.sleep(1)
+        stop.set()
+        await reporter
+        result: dict[str, Any] = {
+            "conversation": conversation_id,
+            "rate": rate,
+            "durationSeconds": duration_seconds,
+            "requested": total,
+            "postingSeconds": round(posting_seconds, 1),
+            "end": await read_progress(),
+            "snapshots": snapshots,
+        }
+        if failure is not None:
+            result["error"] = describe_error(failure)
+        print_json({"paced": result})
+        print_json({"status": await self.read_status(conversation_id)})
+        return 1 if failure is not None else 0
+
 
 def flood_message_text(index: int) -> str:
     prefix = f"flood message {index + 1:06d}: "
@@ -280,8 +425,16 @@ def flood_message_text(index: int) -> str:
     return (prefix + filler)[:FLOOD_MESSAGE_BYTES]
 
 
-def read_history_event_count(conversation_id: str) -> int | None:
-    """Count the history events still kept, through dexcli; None if unavailable."""
+def read_history_event_summary(conversation_id: str) -> dict[str, int | None]:
+    """Return the number of history events Dex still keeps and the highest event ID.
+
+    Dex keeps a recent window of history, so the kept count is not a running total;
+    the highest event ID counts every event written. Both are None if unavailable.
+    """
+    summary: dict[str, int | None] = {"eventsKept": None, "highestEventId": None}
+    dexcli = shutil.which("dexcli")
+    if dexcli is None:
+        return summary
     dexcli = shutil.which("dexcli")
     if dexcli is None:
         return None
@@ -305,26 +458,19 @@ def read_history_event_count(conversation_id: str) -> int | None:
         check=False,
     )
     if completed.returncode != 0:
-        return None
-    return count_history_events(completed.stdout)
-
-
-def count_history_events(output: str) -> int | None:
+        return summary
     try:
-        parsed = json.loads(output)
-    except json.JSONDecodeError:
-        lines = [line for line in output.splitlines() if line.strip()]
-        try:
-            return sum(len(json.loads(line).get("events", [])) for line in lines)
-        except (json.JSONDecodeError, AttributeError):
-            return None
-    if isinstance(parsed, list):
-        return len(parsed)
-    if isinstance(parsed, dict):
-        for key in ("events", "historyEvents", "history_events"):
-            if isinstance(parsed.get(key), list):
-                return len(parsed[key])
-    return None
+        event_ids = [
+            int(event["eventId"])
+            for line in completed.stdout.splitlines()
+            if line.strip()
+            for event in json.loads(line).get("events", [])
+        ]
+    except (json.JSONDecodeError, KeyError, ValueError):
+        return summary
+    summary["eventsKept"] = len(event_ids)
+    summary["highestEventId"] = max(event_ids, default=None)
+    return summary
 
 
 def parse_arguments(argv: list[str]) -> argparse.Namespace:
@@ -352,11 +498,25 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     flood.add_argument("--rate", type=float, default=0, help="messages per second; 0 is unlimited")
     flood.add_argument("--concurrency", type=int, default=16)
     flood.add_argument("--max-seconds", type=float, default=1800)
+    paced = commands.add_parser("paced")
+    paced.add_argument("conversation_id")
+    paced.add_argument("--rate", type=float, required=True, help="messages per second")
+    paced.add_argument("--duration-seconds", type=float, required=True)
+    paced.add_argument(
+        "--snapshot-at",
+        default="",
+        help="comma-separated accepted counts at which to record a snapshot",
+    )
+    paced.add_argument("--drain-seconds", type=float, default=60)
+    wait_replies = commands.add_parser("wait-replies")
+    wait_replies.add_argument("conversation_id")
+    wait_replies.add_argument("reply_count", type=int)
+    wait_replies.add_argument("--timeout-seconds", type=float, default=60)
     return parser.parse_args(argv)
 
 
 async def run_command(arguments: argparse.Namespace) -> int:
-    flow = build_support_conversation_flow()
+    flow = build_support_conversation_flow(FLOW_VERSION)
     cache, cache_directory = open_process_blob_cache("client")
     client = AsyncClient(
         build_registry(flow),
@@ -387,6 +547,20 @@ async def run_command(arguments: argparse.Namespace) -> int:
                 arguments.rate,
                 arguments.concurrency,
                 arguments.max_seconds,
+            )
+        elif arguments.command == "paced":
+            return await driver.post_at_fixed_rate(
+                arguments.conversation_id,
+                arguments.rate,
+                arguments.duration_seconds,
+                [int(value) for value in arguments.snapshot_at.split(",") if value],
+                arguments.drain_seconds,
+            )
+        elif arguments.command == "wait-replies":
+            return await driver.wait_for_replies(
+                arguments.conversation_id,
+                arguments.reply_count,
+                arguments.timeout_seconds,
             )
         return 0
     except (DexServiceError, FlowAlreadyStartedError, ValueError) as error:

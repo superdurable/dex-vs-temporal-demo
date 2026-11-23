@@ -1,18 +1,18 @@
 {
   "schemaVersion": "2.0",
-  "generatedAt": "2026-11-23T08:20:25Z",
+  "generatedAt": "2026-11-23T08:43:31Z",
   "valid": true,
   "source": {
     "language": "python",
-    "path": "support_conversation/flow.py"
+    "path": "support_conversation/flow_v2.py"
   },
   "flow": {
     "name": "SupportConversationFlow",
-    "startStepId": "step:GenerateReplyStep",
+    "startStepId": "step:AnalyzeSentimentStep",
     "span": {
-      "startLine": 231,
+      "startLine": 245,
       "startColumn": 1,
-      "endLine": 325,
+      "endLine": 342,
       "endColumn": 10
     }
   },
@@ -24,9 +24,9 @@
       "parentId": "rpc:get_transcript_page",
       "phase": "rpc",
       "span": {
-        "startLine": 283,
+        "startLine": 300,
         "startColumn": 5,
-        "endLine": 325,
+        "endLine": 342,
         "endColumn": 10
       }
     },
@@ -37,9 +37,9 @@
       "parentId": "step:CloseConversationStep",
       "phase": "execute",
       "span": {
-        "startLine": 211,
+        "startLine": 225,
         "startColumn": 5,
-        "endLine": 225,
+        "endLine": 239,
         "endColumn": 10
       }
     },
@@ -50,9 +50,9 @@
       "parentId": "step:WaitAfterNudgeStep",
       "phase": "execute",
       "span": {
-        "startLine": 193,
+        "startLine": 210,
         "startColumn": 5,
-        "endLine": 202,
+        "endLine": 216,
         "endColumn": 10
       }
     },
@@ -63,22 +63,22 @@
       "parentId": "step:WaitForCustomerStep",
       "phase": "execute",
       "span": {
-        "startLine": 156,
+        "startLine": 176,
         "startColumn": 5,
-        "endLine": 165,
+        "endLine": 182,
         "endColumn": 10
       }
     },
     {
-      "id": "decision:rpc:assign_agent:280:16",
+      "id": "decision:rpc:assign_agent:297:16",
       "kind": "decision",
       "name": "rpcResult",
       "parentId": "rpc:assign_agent",
       "phase": "rpc",
       "span": {
-        "startLine": 280,
+        "startLine": 297,
         "startColumn": 16,
-        "endLine": 280,
+        "endLine": 297,
         "endColumn": 37
       },
       "decision": {
@@ -86,16 +86,16 @@
       }
     },
     {
-      "id": "decision:rpc:get_transcript_page:300:24",
+      "id": "decision:rpc:get_transcript_page:317:24",
       "kind": "decision",
       "name": "rpcResult",
       "parentId": "rpc:get_transcript_page",
       "condition": "page_token != CURRENT_CHUNK_TOKEN and int(page_token) \u003c int(oldest)",
       "phase": "rpc",
       "span": {
-        "startLine": 300,
+        "startLine": 317,
         "startColumn": 24,
-        "endLine": 307,
+        "endLine": 324,
         "endColumn": 18
       },
       "decision": {
@@ -103,16 +103,16 @@
       }
     },
     {
-      "id": "decision:rpc:get_transcript_page:318:16",
+      "id": "decision:rpc:get_transcript_page:335:16",
       "kind": "decision",
       "name": "rpcResult",
       "parentId": "rpc:get_transcript_page",
       "condition": "otherwise",
       "phase": "rpc",
       "span": {
-        "startLine": 318,
+        "startLine": 335,
         "startColumn": 16,
-        "endLine": 325,
+        "endLine": 342,
         "endColumn": 10
       },
       "decision": {
@@ -120,15 +120,15 @@
       }
     },
     {
-      "id": "decision:rpc:post_message:271:16",
+      "id": "decision:rpc:post_message:288:16",
       "kind": "decision",
       "name": "rpcResult",
       "parentId": "rpc:post_message",
       "phase": "rpc",
       "span": {
-        "startLine": 271,
+        "startLine": 288,
         "startColumn": 16,
-        "endLine": 271,
+        "endLine": 288,
         "endColumn": 31
       },
       "decision": {
@@ -136,16 +136,32 @@
       }
     },
     {
-      "id": "decision:step:CloseConversationStep:213:20",
+      "id": "decision:step:AnalyzeSentimentStep:105:16",
+      "kind": "decision",
+      "name": "goToMany",
+      "parentId": "step:AnalyzeSentimentStep",
+      "phase": "execute",
+      "span": {
+        "startLine": 105,
+        "startColumn": 16,
+        "endLine": 111,
+        "endColumn": 10
+      },
+      "decision": {
+        "type": "goToMany"
+      }
+    },
+    {
+      "id": "decision:step:CloseConversationStep:227:20",
       "kind": "decision",
       "name": "goTo",
       "parentId": "step:CloseConversationStep",
       "condition": "CUSTOMER_MESSAGES.size(context) \u003e 0",
       "phase": "execute",
       "span": {
-        "startLine": 213,
+        "startLine": 227,
         "startColumn": 20,
-        "endLine": 213,
+        "endLine": 227,
         "endColumn": 53
       },
       "decision": {
@@ -153,16 +169,16 @@
       }
     },
     {
-      "id": "decision:step:CloseConversationStep:221:16",
+      "id": "decision:step:CloseConversationStep:235:16",
       "kind": "decision",
       "name": "forceCompleteIfChannelsEmpty",
       "parentId": "step:CloseConversationStep",
       "condition": "not (CUSTOMER_MESSAGES.size(context) \u003e 0)",
       "phase": "execute",
       "span": {
-        "startLine": 221,
+        "startLine": 235,
         "startColumn": 16,
-        "endLine": 225,
+        "endLine": 239,
         "endColumn": 10
       },
       "decision": {
@@ -173,15 +189,15 @@
       }
     },
     {
-      "id": "decision:step:GenerateReplyStep:143:16",
+      "id": "decision:step:GenerateReplyStep:162:16",
       "kind": "decision",
       "name": "goTo",
       "parentId": "step:GenerateReplyStep",
       "phase": "execute",
       "span": {
-        "startLine": 143,
+        "startLine": 162,
         "startColumn": 16,
-        "endLine": 143,
+        "endLine": 162,
         "endColumn": 58
       },
       "decision": {
@@ -189,15 +205,15 @@
       }
     },
     {
-      "id": "decision:step:NudgeCustomerStep:181:16",
+      "id": "decision:step:NudgeCustomerStep:198:16",
       "kind": "decision",
       "name": "goTo",
       "parentId": "step:NudgeCustomerStep",
       "phase": "execute",
       "span": {
-        "startLine": 181,
+        "startLine": 198,
         "startColumn": 16,
-        "endLine": 181,
+        "endLine": 198,
         "endColumn": 48
       },
       "decision": {
@@ -205,16 +221,16 @@
       }
     },
     {
-      "id": "decision:step:WaitAfterNudgeStep:195:20",
+      "id": "decision:step:WaitAfterNudgeStep:212:20",
       "kind": "decision",
       "name": "goTo",
       "parentId": "step:WaitAfterNudgeStep",
       "condition": "context.has_timer_fired()",
       "phase": "execute",
       "span": {
-        "startLine": 195,
+        "startLine": 212,
         "startColumn": 20,
-        "endLine": 195,
+        "endLine": 212,
         "endColumn": 55
       },
       "decision": {
@@ -222,33 +238,33 @@
       }
     },
     {
-      "id": "decision:step:WaitAfterNudgeStep:196:16",
+      "id": "decision:step:WaitAfterNudgeStep:213:16",
       "kind": "decision",
-      "name": "goToMany",
+      "name": "goTo",
       "parentId": "step:WaitAfterNudgeStep",
       "condition": "not (context.has_timer_fired())",
       "phase": "execute",
       "span": {
-        "startLine": 196,
+        "startLine": 213,
         "startColumn": 16,
-        "endLine": 202,
+        "endLine": 216,
         "endColumn": 10
       },
       "decision": {
-        "type": "goToMany"
+        "type": "goTo"
       }
     },
     {
-      "id": "decision:step:WaitForCustomerStep:158:20",
+      "id": "decision:step:WaitForCustomerStep:178:20",
       "kind": "decision",
       "name": "goTo",
       "parentId": "step:WaitForCustomerStep",
       "condition": "context.has_timer_fired()",
       "phase": "execute",
       "span": {
-        "startLine": 158,
+        "startLine": 178,
         "startColumn": 20,
-        "endLine": 158,
+        "endLine": 178,
         "endColumn": 51
       },
       "decision": {
@@ -256,20 +272,20 @@
       }
     },
     {
-      "id": "decision:step:WaitForCustomerStep:159:16",
+      "id": "decision:step:WaitForCustomerStep:179:16",
       "kind": "decision",
-      "name": "goToMany",
+      "name": "goTo",
       "parentId": "step:WaitForCustomerStep",
       "condition": "not (context.has_timer_fired())",
       "phase": "execute",
       "span": {
-        "startLine": 159,
+        "startLine": 179,
         "startColumn": 16,
-        "endLine": 165,
+        "endLine": 182,
         "endColumn": 10
       },
       "decision": {
-        "type": "goToMany"
+        "type": "goTo"
       }
     },
     {
@@ -277,9 +293,9 @@
       "kind": "attribute",
       "name": "AssignedAgent",
       "span": {
-        "startLine": 57,
+        "startLine": 59,
         "startColumn": 1,
-        "endLine": 57,
+        "endLine": 59,
         "endColumn": 49
       },
       "resource": {
@@ -291,9 +307,9 @@
       "kind": "attribute",
       "name": "ConversationState",
       "span": {
-        "startLine": 56,
+        "startLine": 58,
         "startColumn": 1,
-        "endLine": 56,
+        "endLine": 58,
         "endColumn": 71
       },
       "resource": {
@@ -305,9 +321,9 @@
       "kind": "attribute",
       "name": "Summary",
       "span": {
-        "startLine": 58,
+        "startLine": 60,
         "startColumn": 1,
-        "endLine": 58,
+        "endLine": 60,
         "endColumn": 50
       },
       "resource": {
@@ -319,9 +335,9 @@
       "kind": "attribute",
       "name": "TranscriptChunks",
       "span": {
-        "startLine": 59,
+        "startLine": 61,
         "startColumn": 1,
-        "endLine": 59,
+        "endLine": 61,
         "endColumn": 70
       },
       "resource": {
@@ -334,9 +350,9 @@
       "kind": "channel",
       "name": "CustomerMessages",
       "span": {
-        "startLine": 55,
+        "startLine": 57,
         "startColumn": 1,
-        "endLine": 55,
+        "endLine": 57,
         "endColumn": 53
       },
       "resource": {
@@ -348,9 +364,9 @@
       "kind": "rpc",
       "name": "assign_agent",
       "span": {
-        "startLine": 274,
+        "startLine": 291,
         "startColumn": 5,
-        "endLine": 280,
+        "endLine": 297,
         "endColumn": 37
       }
     },
@@ -359,9 +375,9 @@
       "kind": "rpc",
       "name": "get_transcript_page",
       "span": {
-        "startLine": 283,
+        "startLine": 300,
         "startColumn": 5,
-        "endLine": 325,
+        "endLine": 342,
         "endColumn": 10
       }
     },
@@ -370,10 +386,26 @@
       "kind": "rpc",
       "name": "post_message",
       "span": {
-        "startLine": 264,
+        "startLine": 281,
         "startColumn": 5,
-        "endLine": 271,
+        "endLine": 288,
         "endColumn": 31
+      }
+    },
+    {
+      "id": "step:AnalyzeSentimentStep",
+      "kind": "step",
+      "name": "AnalyzeSentimentStep",
+      "phase": "execute",
+      "start": true,
+      "span": {
+        "startLine": 263,
+        "startColumn": 36,
+        "endLine": 263,
+        "endColumn": 58
+      },
+      "metadata": {
+        "explanation": "Analyze the sentiment of one customer message before the reply."
       }
     },
     {
@@ -382,9 +414,9 @@
       "name": "CloseConversationStep",
       "phase": "execute",
       "span": {
-        "startLine": 251,
+        "startLine": 268,
         "startColumn": 13,
-        "endLine": 251,
+        "endLine": 268,
         "endColumn": 36
       },
       "metadata": {
@@ -396,15 +428,14 @@
       "kind": "step",
       "name": "GenerateReplyStep",
       "phase": "execute",
-      "start": true,
       "span": {
-        "startLine": 247,
-        "startColumn": 36,
-        "endLine": 247,
-        "endColumn": 55
+        "startLine": 264,
+        "startColumn": 13,
+        "endLine": 264,
+        "endColumn": 32
       },
       "metadata": {
-        "explanation": "Answer the queued customer messages with the model and its tools, and record messages and reply."
+        "explanation": "Answer one customer message with the model and its tools, and record the message and the reply."
       }
     },
     {
@@ -413,9 +444,9 @@
       "name": "NudgeCustomerStep",
       "phase": "execute",
       "span": {
-        "startLine": 249,
+        "startLine": 266,
         "startColumn": 13,
-        "endLine": 249,
+        "endLine": 266,
         "endColumn": 32
       },
       "metadata": {
@@ -428,9 +459,9 @@
       "name": "WaitAfterNudgeStep",
       "phase": "wait_for+execute",
       "span": {
-        "startLine": 250,
+        "startLine": 267,
         "startColumn": 13,
-        "endLine": 250,
+        "endLine": 267,
         "endColumn": 34
       },
       "metadata": {
@@ -443,9 +474,9 @@
       "name": "WaitForCustomerStep",
       "phase": "wait_for+execute",
       "span": {
-        "startLine": 248,
+        "startLine": 265,
         "startColumn": 13,
-        "endLine": 248,
+        "endLine": 265,
         "endColumn": 35
       },
       "metadata": {
@@ -453,15 +484,15 @@
       }
     },
     {
-      "id": "wait:WaitAfterNudgeStep:188:16:0",
+      "id": "wait:WaitAfterNudgeStep:205:16:0",
       "kind": "wait",
       "name": "anyOf",
       "parentId": "step:WaitAfterNudgeStep",
       "phase": "wait_for",
       "span": {
-        "startLine": 188,
+        "startLine": 205,
         "startColumn": 16,
-        "endLine": 191,
+        "endLine": 208,
         "endColumn": 10
       },
       "wait": {
@@ -469,14 +500,13 @@
         "conditions": [
           {
             "kind": "channel",
-            "label": "CustomerMessages.for 1…MAX_MESSAGES_PER_REPLY",
+            "label": "CustomerMessages.for 1",
             "resourceId": "resource:channel:CUSTOMER_MESSAGES",
-            "expression": "at_least=1, at_most=MAX_MESSAGES_PER_REPLY",
             "span": {
-              "startLine": 189,
+              "startLine": 206,
               "startColumn": 13,
-              "endLine": 189,
-              "endColumn": 84
+              "endLine": 206,
+              "endColumn": 40
             }
           },
           {
@@ -484,9 +514,9 @@
             "label": "timedelta(seconds=input.close_after_seconds) timer",
             "expression": "timedelta(seconds=input.close_after_seconds)",
             "span": {
-              "startLine": 190,
+              "startLine": 207,
               "startColumn": 13,
-              "endLine": 190,
+              "endLine": 207,
               "endColumn": 76
             }
           }
@@ -494,15 +524,15 @@
       }
     },
     {
-      "id": "wait:WaitForCustomerStep:151:16:0",
+      "id": "wait:WaitForCustomerStep:171:16:0",
       "kind": "wait",
       "name": "anyOf",
       "parentId": "step:WaitForCustomerStep",
       "phase": "wait_for",
       "span": {
-        "startLine": 151,
+        "startLine": 171,
         "startColumn": 16,
-        "endLine": 154,
+        "endLine": 174,
         "endColumn": 10
       },
       "wait": {
@@ -510,14 +540,13 @@
         "conditions": [
           {
             "kind": "channel",
-            "label": "CustomerMessages.for 1…MAX_MESSAGES_PER_REPLY",
+            "label": "CustomerMessages.for 1",
             "resourceId": "resource:channel:CUSTOMER_MESSAGES",
-            "expression": "at_least=1, at_most=MAX_MESSAGES_PER_REPLY",
             "span": {
-              "startLine": 152,
+              "startLine": 172,
               "startColumn": 13,
-              "endLine": 152,
-              "endColumn": 84
+              "endLine": 172,
+              "endColumn": 40
             }
           },
           {
@@ -525,9 +554,9 @@
             "label": "timedelta(seconds=input.idle_seconds) timer",
             "expression": "timedelta(seconds=input.idle_seconds)",
             "span": {
-              "startLine": 153,
+              "startLine": 173,
               "startColumn": 13,
-              "endLine": 153,
+              "endLine": 173,
               "endColumn": 69
             }
           }
@@ -539,117 +568,130 @@
     {
       "id": "edge:0001",
       "kind": "transition",
-      "from": "decision:step:CloseConversationStep:213:20",
-      "to": "step:WaitForCustomerStep",
-      "label": "go_to",
+      "from": "decision:step:AnalyzeSentimentStep:105:16",
+      "to": "step:GenerateReplyStep",
+      "label": "fan-out",
       "span": {
-        "startLine": 213,
-        "startColumn": 20,
-        "endLine": 213,
-        "endColumn": 53
+        "startLine": 106,
+        "startColumn": 13,
+        "endLine": 110,
+        "endColumn": 14
       }
     },
     {
       "id": "edge:0002",
       "kind": "transition",
-      "from": "decision:step:CloseConversationStep:221:16",
+      "from": "decision:step:CloseConversationStep:227:20",
       "to": "step:WaitForCustomerStep",
-      "label": "fan-out",
+      "label": "go_to",
       "span": {
-        "startLine": 223,
-        "startColumn": 13,
-        "endLine": 223,
-        "endColumn": 56
+        "startLine": 227,
+        "startColumn": 20,
+        "endLine": 227,
+        "endColumn": 53
       }
     },
     {
       "id": "edge:0003",
       "kind": "transition",
-      "from": "decision:step:GenerateReplyStep:143:16",
+      "from": "decision:step:CloseConversationStep:235:16",
       "to": "step:WaitForCustomerStep",
-      "label": "go_to",
+      "label": "fan-out",
       "span": {
-        "startLine": 143,
-        "startColumn": 16,
-        "endLine": 143,
-        "endColumn": 58
+        "startLine": 237,
+        "startColumn": 13,
+        "endLine": 237,
+        "endColumn": 56
       }
     },
     {
       "id": "edge:0004",
       "kind": "transition",
-      "from": "decision:step:NudgeCustomerStep:181:16",
-      "to": "step:WaitAfterNudgeStep",
+      "from": "decision:step:GenerateReplyStep:162:16",
+      "to": "step:WaitForCustomerStep",
       "label": "go_to",
       "span": {
-        "startLine": 181,
+        "startLine": 162,
         "startColumn": 16,
-        "endLine": 181,
-        "endColumn": 48
+        "endLine": 162,
+        "endColumn": 58
       }
     },
     {
       "id": "edge:0005",
       "kind": "transition",
-      "from": "decision:step:WaitAfterNudgeStep:195:20",
-      "to": "step:CloseConversationStep",
+      "from": "decision:step:NudgeCustomerStep:198:16",
+      "to": "step:WaitAfterNudgeStep",
       "label": "go_to",
       "span": {
-        "startLine": 195,
-        "startColumn": 20,
-        "endLine": 195,
-        "endColumn": 55
+        "startLine": 198,
+        "startColumn": 16,
+        "endLine": 198,
+        "endColumn": 48
       }
     },
     {
       "id": "edge:0006",
       "kind": "transition",
-      "from": "decision:step:WaitAfterNudgeStep:196:16",
-      "to": "step:GenerateReplyStep",
-      "label": "fan-out",
+      "from": "decision:step:WaitAfterNudgeStep:212:20",
+      "to": "step:CloseConversationStep",
+      "label": "go_to",
       "span": {
-        "startLine": 197,
-        "startColumn": 13,
-        "endLine": 201,
-        "endColumn": 14
+        "startLine": 212,
+        "startColumn": 20,
+        "endLine": 212,
+        "endColumn": 55
       }
     },
     {
       "id": "edge:0007",
       "kind": "transition",
-      "from": "decision:step:WaitForCustomerStep:158:20",
-      "to": "step:NudgeCustomerStep",
+      "from": "decision:step:WaitAfterNudgeStep:213:16",
+      "to": "step:AnalyzeSentimentStep",
       "label": "go_to",
       "span": {
-        "startLine": 158,
-        "startColumn": 20,
-        "endLine": 158,
-        "endColumn": 51
+        "startLine": 213,
+        "startColumn": 16,
+        "endLine": 216,
+        "endColumn": 10
       }
     },
     {
       "id": "edge:0008",
       "kind": "transition",
-      "from": "decision:step:WaitForCustomerStep:159:16",
-      "to": "step:GenerateReplyStep",
-      "label": "fan-out",
+      "from": "decision:step:WaitForCustomerStep:178:20",
+      "to": "step:NudgeCustomerStep",
+      "label": "go_to",
       "span": {
-        "startLine": 160,
-        "startColumn": 13,
-        "endLine": 164,
-        "endColumn": 14
+        "startLine": 178,
+        "startColumn": 20,
+        "endLine": 178,
+        "endColumn": 51
       }
     },
     {
       "id": "edge:0009",
+      "kind": "transition",
+      "from": "decision:step:WaitForCustomerStep:179:16",
+      "to": "step:AnalyzeSentimentStep",
+      "label": "go_to",
+      "span": {
+        "startLine": 179,
+        "startColumn": 16,
+        "endLine": 182,
+        "endColumn": 10
+      }
+    },
+    {
+      "id": "edge:0010",
       "kind": "resource_read",
       "from": "resource:attribute:CONVERSATION_STATE",
       "to": "rpc:get_transcript_page",
       "label": "get",
       "span": {
-        "startLine": 292,
+        "startLine": 309,
         "startColumn": 17,
-        "endLine": 292,
+        "endLine": 309,
         "endColumn": 48
       },
       "metadata": {
@@ -657,32 +699,16 @@
       }
     },
     {
-      "id": "edge:0010",
-      "kind": "resource_read",
-      "from": "resource:attribute:CONVERSATION_STATE",
-      "to": "step:CloseConversationStep",
-      "label": "get",
-      "span": {
-        "startLine": 214,
-        "startColumn": 17,
-        "endLine": 214,
-        "endColumn": 48
-      },
-      "metadata": {
-        "phase": "execute"
-      }
-    },
-    {
       "id": "edge:0011",
       "kind": "resource_read",
       "from": "resource:attribute:CONVERSATION_STATE",
-      "to": "step:GenerateReplyStep",
+      "to": "step:AnalyzeSentimentStep",
       "label": "get",
       "span": {
-        "startLine": 122,
-        "startColumn": 17,
-        "endLine": 122,
-        "endColumn": 48
+        "startLine": 109,
+        "startColumn": 56,
+        "endLine": 109,
+        "endColumn": 87
       },
       "metadata": {
         "phase": "execute"
@@ -692,12 +718,12 @@
       "id": "edge:0012",
       "kind": "resource_read",
       "from": "resource:attribute:CONVERSATION_STATE",
-      "to": "step:NudgeCustomerStep",
+      "to": "step:CloseConversationStep",
       "label": "get",
       "span": {
-        "startLine": 175,
+        "startLine": 228,
         "startColumn": 17,
-        "endLine": 175,
+        "endLine": 228,
         "endColumn": 48
       },
       "metadata": {
@@ -708,13 +734,13 @@
       "id": "edge:0013",
       "kind": "resource_read",
       "from": "resource:attribute:CONVERSATION_STATE",
-      "to": "step:WaitAfterNudgeStep",
+      "to": "step:GenerateReplyStep",
       "label": "get",
       "span": {
-        "startLine": 200,
-        "startColumn": 56,
-        "endLine": 200,
-        "endColumn": 87
+        "startLine": 141,
+        "startColumn": 17,
+        "endLine": 141,
+        "endColumn": 48
       },
       "metadata": {
         "phase": "execute"
@@ -724,13 +750,13 @@
       "id": "edge:0014",
       "kind": "resource_read",
       "from": "resource:attribute:CONVERSATION_STATE",
-      "to": "step:WaitForCustomerStep",
+      "to": "step:NudgeCustomerStep",
       "label": "get",
       "span": {
-        "startLine": 163,
-        "startColumn": 56,
-        "endLine": 163,
-        "endColumn": 87
+        "startLine": 192,
+        "startColumn": 17,
+        "endLine": 192,
+        "endColumn": 48
       },
       "metadata": {
         "phase": "execute"
@@ -743,9 +769,9 @@
       "to": "step:GenerateReplyStep",
       "label": "get",
       "span": {
-        "startLine": 136,
+        "startLine": 155,
         "startColumn": 21,
-        "endLine": 136,
+        "endLine": 155,
         "endColumn": 41
       },
       "metadata": {
@@ -759,9 +785,9 @@
       "to": "rpc:get_transcript_page",
       "label": "get",
       "span": {
-        "startLine": 308,
+        "startLine": 325,
         "startColumn": 17,
-        "endLine": 308,
+        "endLine": 325,
         "endColumn": 59
       },
       "metadata": {
@@ -775,9 +801,9 @@
       "to": "step:GenerateReplyStep",
       "label": "get",
       "span": {
-        "startLine": 124,
+        "startLine": 143,
         "startColumn": 20,
-        "endLine": 124,
+        "endLine": 143,
         "endColumn": 71
       },
       "metadata": {
@@ -791,9 +817,9 @@
       "to": "step:CloseConversationStep",
       "label": "size",
       "span": {
-        "startLine": 212,
+        "startLine": 226,
         "startColumn": 12,
-        "endLine": 212,
+        "endLine": 226,
         "endColumn": 43
       },
       "metadata": {
@@ -807,10 +833,10 @@
       "to": "step:WaitAfterNudgeStep",
       "label": "results",
       "span": {
-        "startLine": 199,
-        "startColumn": 42,
-        "endLine": 199,
-        "endColumn": 76
+        "startLine": 215,
+        "startColumn": 38,
+        "endLine": 215,
+        "endColumn": 72
       },
       "metadata": {
         "phase": "execute"
@@ -823,10 +849,10 @@
       "to": "step:WaitForCustomerStep",
       "label": "results",
       "span": {
-        "startLine": 162,
-        "startColumn": 42,
-        "endLine": 162,
-        "endColumn": 76
+        "startLine": 181,
+        "startColumn": 38,
+        "endLine": 181,
+        "endColumn": 72
       },
       "metadata": {
         "phase": "execute"
@@ -836,26 +862,26 @@
       "id": "edge:0021",
       "kind": "wait_condition",
       "from": "resource:channel:CUSTOMER_MESSAGES",
-      "to": "wait:WaitAfterNudgeStep:188:16:0",
-      "label": "CustomerMessages.for 1…MAX_MESSAGES_PER_REPLY",
+      "to": "wait:WaitAfterNudgeStep:205:16:0",
+      "label": "CustomerMessages.for 1",
       "span": {
-        "startLine": 189,
+        "startLine": 206,
         "startColumn": 13,
-        "endLine": 189,
-        "endColumn": 84
+        "endLine": 206,
+        "endColumn": 40
       }
     },
     {
       "id": "edge:0022",
       "kind": "wait_condition",
       "from": "resource:channel:CUSTOMER_MESSAGES",
-      "to": "wait:WaitForCustomerStep:151:16:0",
-      "label": "CustomerMessages.for 1…MAX_MESSAGES_PER_REPLY",
+      "to": "wait:WaitForCustomerStep:171:16:0",
+      "label": "CustomerMessages.for 1",
       "span": {
-        "startLine": 152,
+        "startLine": 172,
         "startColumn": 13,
-        "endLine": 152,
-        "endColumn": 84
+        "endLine": 172,
+        "endColumn": 40
       }
     },
     {
@@ -865,9 +891,9 @@
       "to": "resource:attribute:ASSIGNED_AGENT",
       "label": "set",
       "span": {
-        "startLine": 279,
+        "startLine": 296,
         "startColumn": 9,
-        "endLine": 279,
+        "endLine": 296,
         "endColumn": 48
       },
       "metadata": {
@@ -881,9 +907,9 @@
       "to": "resource:channel:CUSTOMER_MESSAGES",
       "label": "publish",
       "span": {
-        "startLine": 270,
+        "startLine": 287,
         "startColumn": 9,
-        "endLine": 270,
+        "endLine": 287,
         "endColumn": 49
       },
       "metadata": {
@@ -897,9 +923,9 @@
       "to": "resource:attribute:CONVERSATION_STATE",
       "label": "set",
       "span": {
-        "startLine": 219,
+        "startLine": 233,
         "startColumn": 9,
-        "endLine": 219,
+        "endLine": 233,
         "endColumn": 47
       },
       "metadata": {
@@ -913,9 +939,9 @@
       "to": "resource:attribute:CONVERSATION_STATE",
       "label": "set",
       "span": {
-        "startLine": 142,
+        "startLine": 161,
         "startColumn": 9,
-        "endLine": 142,
+        "endLine": 161,
         "endColumn": 47
       },
       "metadata": {
@@ -929,9 +955,9 @@
       "to": "resource:attribute:SUMMARY",
       "label": "set",
       "span": {
-        "startLine": 133,
+        "startLine": 152,
         "startColumn": 13,
-        "endLine": 138,
+        "endLine": 157,
         "endColumn": 14
       },
       "metadata": {
@@ -945,9 +971,9 @@
       "to": "resource:attribute:TRANSCRIPT_CHUNKS",
       "label": "delete",
       "span": {
-        "startLine": 139,
+        "startLine": 158,
         "startColumn": 13,
-        "endLine": 139,
+        "endLine": 158,
         "endColumn": 76
       },
       "metadata": {
@@ -961,9 +987,9 @@
       "to": "resource:attribute:TRANSCRIPT_CHUNKS",
       "label": "set",
       "span": {
-        "startLine": 140,
+        "startLine": 159,
         "startColumn": 9,
-        "endLine": 140,
+        "endLine": 159,
         "endColumn": 84
       },
       "metadata": {
@@ -977,9 +1003,9 @@
       "to": "resource:attribute:CONVERSATION_STATE",
       "label": "set",
       "span": {
-        "startLine": 180,
+        "startLine": 197,
         "startColumn": 9,
-        "endLine": 180,
+        "endLine": 197,
         "endColumn": 47
       },
       "metadata": {
@@ -993,8 +1019,9 @@
       "id": "conversation",
       "label": "Conversation",
       "stepIds": [
+        "step:GenerateReplyStep",
         "step:WaitForCustomerStep",
-        "step:GenerateReplyStep"
+        "step:AnalyzeSentimentStep"
       ]
     },
     {

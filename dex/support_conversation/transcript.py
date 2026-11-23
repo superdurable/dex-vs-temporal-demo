@@ -31,6 +31,8 @@ class ReplyRequest:
 
     settings: ConversationSettings
     customer_messages: list[str]
+    # Set by AnalyzeSentimentStep (Flow code v2); empty when no analysis ran.
+    sentiment: str = ""
 
 
 @dataclass

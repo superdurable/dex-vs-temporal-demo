@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # D5: flood one long-lived AI support conversation with 60,000 customer
-# messages; each AI reply answers the messages queued since the last reply.
+# messages; each customer message gets its own AI reply, in Channel order.
+# COUNT=60000 takes far longer than the 30-minute bound at about 10 replies/s.
 # Record accepted messages, wall-clock time until every message is answered,
 # final status,
 # record count, retained chunks, and the Summary, then read the newest page

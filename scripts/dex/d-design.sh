@@ -22,14 +22,14 @@ trap stop_everything_unless_kept EXIT
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("valid:", d["valid"], "diagnostics:", d["diagnostics"])' \
     "$VISUALIZE_DIR/SupportConversationFlow.json"
   if ! cmp -s <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("generatedAt"); print(json.dumps(d, sort_keys=True))' "$VISUALIZE_DIR/SupportConversationFlow.json") \
-             <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("generatedAt"); print(json.dumps(d, sort_keys=True))' "$DEX_APP_DIR/flow-definitions/SupportConversationFlow.json"); then
-    log "WARNING: dex/flow-definitions/SupportConversationFlow.json is stale; regenerate it:"
-    log "  cd dex && dexcli visualize support_conversation/flow.py --schema-version 2.0 --json --open=false --out flow-definitions/SupportConversationFlow"
+             <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("generatedAt"); print(json.dumps(d, sort_keys=True))' "$DEX_APP_DIR/flow-definitions/v1/SupportConversationFlow.json"); then
+    log "WARNING: dex/flow-definitions/v1/SupportConversationFlow.json is stale; regenerate it:"
+    log "  cd dex && dexcli visualize support_conversation/flow.py --schema-version 2.0 --json --open=false --out flow-definitions/v1/SupportConversationFlow"
   fi
 
   start_dex_dev
   start_worker
-  grep -i "flow definition" "$RUN_DIR/worker.log" || true
+  grep -i "flow definition" "$(worker_log_path)" || true
 
   drive start "$CONVERSATION_ID" --first-message "Hi, my order has not arrived yet." \
     --idle-seconds 30 --close-after-seconds 3600
