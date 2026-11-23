@@ -81,7 +81,9 @@ class SupportConversationDriver:
         self.client = client
         self.flow = flow
 
-    async def start_conversation(self, conversation_id: str, idle_seconds: int) -> None:
+    async def start_conversation(
+        self, conversation_id: str, idle_seconds: int, close_after_seconds: int
+    ) -> None:
         options = (
             StartFlowOptions(
                 request_id=f"start-{conversation_id}", ignore_already_started=True
@@ -90,10 +92,18 @@ class SupportConversationDriver:
             .with_attribute(TRANSCRIPT_CHUNKS, CURRENT_CHUNK_TOKEN, TranscriptChunk())
         )
         run_id = await self.client.start_flow(
-            self.flow, conversation_id, ConversationStart(idle_seconds), options
+            self.flow,
+            conversation_id,
+            ConversationStart(idle_seconds, close_after_seconds),
+            options,
         )
         print_json(
-            {"conversation": conversation_id, "runId": run_id, "idleSeconds": idle_seconds}
+            {
+                "conversation": conversation_id,
+                "runId": run_id,
+                "idleSeconds": idle_seconds,
+                "closeAfterSeconds": close_after_seconds,
+            }
         )
 
     async def post_message(self, conversation_id: str, text: str) -> None:
@@ -120,16 +130,21 @@ class SupportConversationDriver:
 
     async def read_status(self, conversation_id: str) -> dict[str, Any]:
         info = await self.client.describe_flow(conversation_id)
+        current_chunk = TRANSCRIPT_CHUNKS.instance(CURRENT_CHUNK_TOKEN)
         values = await self.client.get_attributes(
-            conversation_id, CONVERSATION_STATE, ASSIGNED_AGENT, SUMMARY
+            conversation_id, CONVERSATION_STATE, ASSIGNED_AGENT, SUMMARY, current_chunk
         )
         state = values.get(CONVERSATION_STATE) or ConversationState()
         summary = values.get(SUMMARY)
+        chunk = values.get(current_chunk) or TranscriptChunk()
         return {
             "conversation": conversation_id,
             "flowStatus": info.status.name,
             "conversationStatus": state.status,
-            "messageCount": state.message_count,
+            "recordCount": state.record_count,
+            "customerMessageCount": state.customer_message_count,
+            "assistantReplyCount": state.assistant_reply_count,
+            "latestRecords": [asdict(record) for record in chunk.records[-4:]],
             "retainedChunkCount": count_retained_archived_chunks(state),
             "oldestArchivedChunkToken": state.oldest_archived_chunk_token,
             "newestArchivedChunkToken": state.newest_archived_chunk_token,
@@ -146,6 +161,10 @@ class SupportConversationDriver:
         concurrency: int,
         max_seconds: float,
     ) -> int:
+        baseline = await self.client.get_attributes(conversation_id, CONVERSATION_STATE)
+        baseline_replies = (
+            baseline.get(CONVERSATION_STATE) or ConversationState()
+        ).assistant_reply_count
         started = time.monotonic()
         next_index = 0
         accepted = 0
@@ -200,9 +219,40 @@ class SupportConversationDriver:
             info = await self.client.describe_flow(conversation_id)
             if info.status != FlowStatus.RUNNING:
                 result["error"] = {"message": f"Flow is {info.status.name}"}
+        if "error" not in result:
+            result["allRepliedSeconds"] = await self.wait_until_replied(
+                conversation_id, baseline_replies + accepted, started, max_seconds
+            )
         print_json({"flood": result})
         print_json({"status": await self.read_status(conversation_id)})
         return 1 if "error" in result else 0
+
+
+    async def wait_until_replied(
+        self,
+        conversation_id: str,
+        expected_replies: int,
+        started: float,
+        max_seconds: float,
+    ) -> float | None:
+        """Wait until the Flow has answered every flooded message; None on timeout."""
+        last_report = 0.0
+        while time.monotonic() - started <= max_seconds:
+            values = await self.client.get_attributes(conversation_id, CONVERSATION_STATE)
+            state = values.get(CONVERSATION_STATE) or ConversationState()
+            elapsed = time.monotonic() - started
+            if state.assistant_reply_count >= expected_replies:
+                print(f"replied all={state.assistant_reply_count} elapsed_seconds={elapsed:.1f}", flush=True)
+                return round(elapsed, 1)
+            if elapsed - last_report >= 30:
+                last_report = elapsed
+                print(
+                    f"replying replies={state.assistant_reply_count}/{expected_replies} "
+                    f"elapsed_seconds={elapsed:.1f}",
+                    flush=True,
+                )
+            await asyncio.sleep(2)
+        return None
 
 
 def flood_message_text(index: int) -> str:
@@ -264,6 +314,7 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     start = commands.add_parser("start")
     start.add_argument("conversation_id")
     start.add_argument("--idle-seconds", type=int, default=600)
+    start.add_argument("--close-after-seconds", type=int, default=3600)
     post = commands.add_parser("post")
     post.add_argument("conversation_id")
     post.add_argument("text")
@@ -295,7 +346,11 @@ async def run_command(arguments: argparse.Namespace) -> int:
     driver = SupportConversationDriver(client, flow)
     try:
         if arguments.command == "start":
-            await driver.start_conversation(arguments.conversation_id, arguments.idle_seconds)
+            await driver.start_conversation(
+                arguments.conversation_id,
+                arguments.idle_seconds,
+                arguments.close_after_seconds,
+            )
         elif arguments.command == "post":
             await driver.post_message(arguments.conversation_id, arguments.text)
         elif arguments.command == "assign":

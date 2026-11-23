@@ -12,6 +12,7 @@ from support_conversation.mailer import (
     JsonlOutboxMailer,
     outbox_path_from_environment,
 )
+from support_conversation.reply_generator import MockReplyGenerator
 from support_conversation.transcript import LocalTranscriptSummarizer
 
 DEFAULT_SERVER_ADDRESS = "127.0.0.1:18801"
@@ -27,6 +28,7 @@ def build_support_conversation_flow() -> SupportConversationFlow:
     return SupportConversationFlow(
         JsonlOutboxMailer(outbox_path_from_environment()),
         LocalTranscriptSummarizer(),
+        MockReplyGenerator(),
     )
 
 

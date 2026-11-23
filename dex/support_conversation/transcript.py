@@ -19,7 +19,11 @@ TRANSCRIPT_CHUNK_SIZE = 100
 RETAINED_ARCHIVED_CHUNKS = 100
 CHUNK_TOKEN_WIDTH = 20
 
+ROLE_CUSTOMER = "customer"
+ROLE_ASSISTANT = "assistant"
+
 STATUS_WAITING = "waiting"
+STATUS_REPLYING = "replying"
 STATUS_NUDGED = "nudged"
 STATUS_CLOSED = "closed"
 
@@ -27,12 +31,22 @@ STATUS_CLOSED = "closed"
 @dataclass(frozen=True)
 class ConversationStart:
     idle_seconds: int = 600
+    close_after_seconds: int = 3600
+
+
+@dataclass(frozen=True)
+class ReplyRequest:
+    conversation: ConversationStart
+    customer_sequence: int
+    customer_text: str
 
 
 @dataclass
 class TranscriptRecord:
     sequence: int
+    role: str
     text: str
+    tool_calls: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -46,13 +60,20 @@ class ConversationState:
     newest_archived_chunk_token: str = ""
     oldest_archived_chunk_token: str = ""
     status: str = STATUS_WAITING
-    message_count: int = 0
+    customer_message_count: int = 0
+    assistant_reply_count: int = 0
+
+    @property
+    def record_count(self) -> int:
+        return self.next_sequence - 1
 
 
 @dataclass
 class TranscriptSummary:
     summarized_chunk_count: int = 0
-    summarized_message_count: int = 0
+    summarized_record_count: int = 0
+    summarized_customer_count: int = 0
+    summarized_assistant_count: int = 0
     first_sequence: int = 0
     last_sequence: int = 0
     first_text: str = ""
@@ -96,17 +117,26 @@ class LocalTranscriptSummarizer:
         if summary is None or summary.summarized_chunk_count == 0:
             summary = TranscriptSummary(
                 first_sequence=first_record.sequence,
-                first_text=first_record.text[: self.TEXT_PREVIEW_CHARACTERS],
+                first_text=self.preview(first_record),
             )
+        customer_count = sum(1 for r in chunk.records if r.role == ROLE_CUSTOMER)
         return TranscriptSummary(
             summarized_chunk_count=summary.summarized_chunk_count + 1,
-            summarized_message_count=summary.summarized_message_count
+            summarized_record_count=summary.summarized_record_count
             + len(chunk.records),
+            summarized_customer_count=summary.summarized_customer_count
+            + customer_count,
+            summarized_assistant_count=summary.summarized_assistant_count
+            + len(chunk.records)
+            - customer_count,
             first_sequence=summary.first_sequence,
             last_sequence=last_record.sequence,
             first_text=summary.first_text,
-            last_text=last_record.text[: self.TEXT_PREVIEW_CHARACTERS],
+            last_text=self.preview(last_record),
         )
+
+    def preview(self, record: TranscriptRecord) -> str:
+        return f"{record.role}: {record.text}"[: self.TEXT_PREVIEW_CHARACTERS]
 
 
 def archived_chunk_token(first_sequence: int) -> str:
@@ -128,11 +158,10 @@ def next_evicted_chunk_token(state: ConversationState) -> str:
     return state.oldest_archived_chunk_token
 
 
-def waiting_step_options(state: ConversationState | None) -> StepOptions:
-    """Options of a waiting Step: load "current", and the chunk it may evict.
+def transcript_writer_step_options(state: ConversationState | None) -> StepOptions:
+    """Options of a Step that appends one record: load "current" and the chunk it may evict.
 
-    A Step consumes at most one chunk of messages per execution, so it archives
-    at most one chunk and evicts at most one chunk.
+    One appended record archives at most one chunk and evicts at most one chunk.
     """
     loads: list[AttributeMapLoad] = [TRANSCRIPT_CHUNKS.load(CURRENT_CHUNK_TOKEN)]
     if state is not None:
@@ -142,20 +171,24 @@ def waiting_step_options(state: ConversationState | None) -> StepOptions:
     return StepOptions(execute_load_attribute_map_instances=tuple(loads))
 
 
-def append_messages_to_transcript(
+def append_record_to_transcript(
     context: Context,
-    texts: list[str],
+    role: str,
+    text: str,
     summarizer: TranscriptSummarizer,
-) -> ConversationState:
-    """Append consumed messages; archive a full chunk; evict beyond the window."""
+    tool_calls: list[str] | None = None,
+) -> tuple[ConversationState, TranscriptRecord]:
+    """Append one record; archive a full chunk; evict the oldest beyond the window."""
     state = CONVERSATION_STATE.get(context)
     current_chunk = TRANSCRIPT_CHUNKS.get(context, CURRENT_CHUNK_TOKEN)
-    for text in texts:
-        current_chunk.records.append(TranscriptRecord(state.next_sequence, text))
-        state.next_sequence += 1
-        state.message_count += 1
-        if len(current_chunk.records) < TRANSCRIPT_CHUNK_SIZE:
-            continue
+    record = TranscriptRecord(state.next_sequence, role, text, list(tool_calls or []))
+    current_chunk.records.append(record)
+    state.next_sequence += 1
+    if role == ROLE_CUSTOMER:
+        state.customer_message_count += 1
+    else:
+        state.assistant_reply_count += 1
+    if len(current_chunk.records) >= TRANSCRIPT_CHUNK_SIZE:
         token = archived_chunk_token(current_chunk.records[0].sequence)
         TRANSCRIPT_CHUNKS.set(context, token, current_chunk)
         state.newest_archived_chunk_token = token
@@ -166,7 +199,7 @@ def append_messages_to_transcript(
             evict_oldest_archived_chunk(context, state, summarizer)
     TRANSCRIPT_CHUNKS.set(context, CURRENT_CHUNK_TOKEN, current_chunk)
     CONVERSATION_STATE.set(context, state)
-    return state
+    return state, record
 
 
 def evict_oldest_archived_chunk(
@@ -175,7 +208,7 @@ def evict_oldest_archived_chunk(
     summarizer: TranscriptSummarizer,
 ) -> None:
     oldest_token = state.oldest_archived_chunk_token
-    # Loaded through the per-movement options built by waiting_step_options.
+    # Loaded through the per-movement options built by transcript_writer_step_options.
     evicted_chunk = TRANSCRIPT_CHUNKS.get(context, oldest_token)
     SUMMARY.set(
         context,

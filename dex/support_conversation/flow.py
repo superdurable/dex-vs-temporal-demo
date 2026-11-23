@@ -1,4 +1,4 @@
-"""SupportConversationFlow: one long-lived Flow per customer support conversation."""
+"""SupportConversationFlow: one long-lived Flow per AI customer support conversation."""
 
 from __future__ import annotations
 
@@ -23,64 +23,105 @@ from dex import (
 )
 
 from support_conversation.mailer import ConversationMailer
+from support_conversation.reply_generator import ReplyGenerator
 from support_conversation.transcript import (
     ASSIGNED_AGENT,
     CONVERSATION_STATE,
     CURRENT_CHUNK_TOKEN,
     CUSTOMER_MESSAGES,
+    ROLE_ASSISTANT,
+    ROLE_CUSTOMER,
     STATUS_CLOSED,
     STATUS_NUDGED,
+    STATUS_REPLYING,
     STATUS_WAITING,
     SUMMARY,
     TRANSCRIPT_CHUNK_SIZE,
     TRANSCRIPT_CHUNKS,
     ConversationStart,
+    ReplyRequest,
     TranscriptPage,
     TranscriptSummarizer,
-    append_messages_to_transcript,
+    append_record_to_transcript,
     archived_chunk_token,
     parse_transcript_page_token,
-    waiting_step_options,
+    transcript_writer_step_options,
 )
 
 MAX_MESSAGE_CHARACTERS = 4000
 MAX_AGENT_NAME_CHARACTERS = 200
 
-# Movements into a waiting Step carry options that also load the chunk the
-# next archive may evict; see waiting_step_options.
+# Steps run one at a time, so each transcript chunk has a single writer and
+# needs no lock. Every movement into a Step that appends a record carries
+# options that also load the chunk the next archive may evict.
 
 
 # dex:group group-id:conversation group-label:"Conversation"
-# dex:explanation text:"Wait for customer messages, record them, and restart the idle timer after each batch."
+# dex:explanation text:"Wait for the next customer message and record it; the idle timer starts after each reply."
 class WaitForCustomerStep(Step[ConversationStart]):
     def __init__(self, summarizer: TranscriptSummarizer) -> None:
         self.summarizer = summarizer
 
     def get_step_options(self) -> StepOptions:
-        return waiting_step_options(None)
+        return transcript_writer_step_options(None)
 
     def wait_for(self, context: Context, input: ConversationStart) -> Wait:
-        # The Channel is declared first, so queued messages win over a due Timer.
+        # The Channel is declared first, so a queued message wins over a due Timer.
         return Wait.any_of(
-            CUSTOMER_MESSAGES.for_range(at_least=1, at_most=TRANSCRIPT_CHUNK_SIZE),
+            CUSTOMER_MESSAGES.for_one(),
             Timer.by_duration(timedelta(seconds=input.idle_seconds)),
         )
 
     def execute(self, context: Context, input: ConversationStart) -> StepDecision:
         if context.has_timer_fired():
             return go_to(NudgeCustomerStep, input)
-        state = append_messages_to_transcript(
-            context, list(CUSTOMER_MESSAGES.results(context)), self.summarizer
+        text = CUSTOMER_MESSAGES.results(context)[0]
+        state, record = append_record_to_transcript(
+            context, ROLE_CUSTOMER, text, self.summarizer
         )
+        state.status = STATUS_REPLYING
+        CONVERSATION_STATE.set(context, state)
         return go_to_many(
             StepMovement.of(
-                WaitForCustomerStep, input, options=waiting_step_options(state)
+                GenerateReplyStep,
+                ReplyRequest(input, record.sequence, text),
+                options=transcript_writer_step_options(state),
+            )
+        )
+
+
+# dex:group group-id:conversation group-label:"Conversation"
+# dex:explanation text:"Generate the assistant reply with internal tools and record it."
+class GenerateReplyStep(Step[ReplyRequest]):
+    def __init__(
+        self, reply_generator: ReplyGenerator, summarizer: TranscriptSummarizer
+    ) -> None:
+        self.reply_generator = reply_generator
+        self.summarizer = summarizer
+
+    def get_step_options(self) -> StepOptions:
+        return transcript_writer_step_options(None)
+
+    def execute(self, context: Context, input: ReplyRequest) -> StepDecision:
+        reply = self.reply_generator.generate_reply(
+            context.flow_id, input.customer_sequence, input.customer_text
+        )
+        state, _ = append_record_to_transcript(
+            context, ROLE_ASSISTANT, reply.text, self.summarizer, reply.tool_calls
+        )
+        state.status = STATUS_WAITING
+        CONVERSATION_STATE.set(context, state)
+        return go_to_many(
+            StepMovement.of(
+                WaitForCustomerStep,
+                input.conversation,
+                options=transcript_writer_step_options(state),
             )
         )
 
 
 # dex:group group-id:idle-handling group-label:"Idle handling"
-# dex:explanation text:"Send the customer a nudge email after the first idle window."
+# dex:explanation text:"Send the customer a nudge email after the idle window."
 class NudgeCustomerStep(Step[ConversationStart]):
     def __init__(self, mailer: ConversationMailer) -> None:
         self.mailer = mailer
@@ -88,43 +129,48 @@ class NudgeCustomerStep(Step[ConversationStart]):
     def execute(self, context: Context, input: ConversationStart) -> StepDecision:
         state = CONVERSATION_STATE.get(context)
         self.mailer.send_conversation_notice(
-            context.flow_id, "nudge", state.message_count
+            context.flow_id, "nudge", state.record_count
         )
         state.status = STATUS_NUDGED
         CONVERSATION_STATE.set(context, state)
         return go_to_many(
             StepMovement.of(
-                WaitAfterNudgeStep, input, options=waiting_step_options(state)
+                WaitAfterNudgeStep,
+                input,
+                options=transcript_writer_step_options(state),
             )
         )
 
 
 # dex:group group-id:idle-handling group-label:"Idle handling"
-# dex:explanation text:"Wait one more idle window; a message returns to the first wait, the timer closes the conversation."
+# dex:explanation text:"Wait up to the close-after window; a message is recorded and answered, the timer closes the conversation."
 class WaitAfterNudgeStep(Step[ConversationStart]):
     def __init__(self, summarizer: TranscriptSummarizer) -> None:
         self.summarizer = summarizer
 
     def get_step_options(self) -> StepOptions:
-        return waiting_step_options(None)
+        return transcript_writer_step_options(None)
 
     def wait_for(self, context: Context, input: ConversationStart) -> Wait:
         return Wait.any_of(
-            CUSTOMER_MESSAGES.for_range(at_least=1, at_most=TRANSCRIPT_CHUNK_SIZE),
-            Timer.by_duration(timedelta(seconds=input.idle_seconds)),
+            CUSTOMER_MESSAGES.for_one(),
+            Timer.by_duration(timedelta(seconds=input.close_after_seconds)),
         )
 
     def execute(self, context: Context, input: ConversationStart) -> StepDecision:
         if context.has_timer_fired():
             return go_to(CloseConversationStep, input)
-        state = append_messages_to_transcript(
-            context, list(CUSTOMER_MESSAGES.results(context)), self.summarizer
+        text = CUSTOMER_MESSAGES.results(context)[0]
+        state, record = append_record_to_transcript(
+            context, ROLE_CUSTOMER, text, self.summarizer
         )
-        state.status = STATUS_WAITING
+        state.status = STATUS_REPLYING
         CONVERSATION_STATE.set(context, state)
         return go_to_many(
             StepMovement.of(
-                WaitForCustomerStep, input, options=waiting_step_options(state)
+                GenerateReplyStep,
+                ReplyRequest(input, record.sequence, text),
+                options=transcript_writer_step_options(state),
             )
         )
 
@@ -140,19 +186,23 @@ class CloseConversationStep(Step[ConversationStart]):
         if CUSTOMER_MESSAGES.size(context) > 0:
             return go_to_many(
                 StepMovement.of(
-                    WaitForCustomerStep, input, options=waiting_step_options(state)
+                    WaitForCustomerStep,
+                    input,
+                    options=transcript_writer_step_options(state),
                 )
             )
         self.mailer.send_conversation_notice(
-            context.flow_id, "close-summary", state.message_count
+            context.flow_id, "close-summary", state.record_count
         )
         state.status = STATUS_CLOSED
         CONVERSATION_STATE.set(context, state)
         # A message that arrives during this Step sends the Flow back to waiting.
         return force_complete_if_channels_empty(
-            state.message_count,
+            state.record_count,
             StepMovement.of(
-                WaitForCustomerStep, input, options=waiting_step_options(state)
+                WaitForCustomerStep,
+                input,
+                options=transcript_writer_step_options(state),
             ),
             CUSTOMER_MESSAGES,
         )
@@ -160,16 +210,23 @@ class CloseConversationStep(Step[ConversationStart]):
 
 class SupportConversationFlow(Flow[ConversationStart]):
     def __init__(
-        self, mailer: ConversationMailer, summarizer: TranscriptSummarizer
+        self,
+        mailer: ConversationMailer,
+        summarizer: TranscriptSummarizer,
+        reply_generator: ReplyGenerator,
     ) -> None:
         self.wait_for_customer = WaitForCustomerStep(summarizer)
+        self.generate_reply = GenerateReplyStep(reply_generator, summarizer)
         self.nudge_customer = NudgeCustomerStep(mailer)
         self.wait_after_nudge = WaitAfterNudgeStep(summarizer)
         self.close_conversation = CloseConversationStep(mailer)
 
     def get_steps(self) -> StepList[ConversationStart]:
         return StepList.start_step(self.wait_for_customer).other_steps(
-            self.nudge_customer, self.wait_after_nudge, self.close_conversation
+            self.generate_reply,
+            self.nudge_customer,
+            self.wait_after_nudge,
+            self.close_conversation,
         )
 
     def get_persistence_schema(self) -> PersistenceSchema:
