@@ -58,6 +58,18 @@ async def generate_reply(request: ReplyRequest) -> GeneratedReply:
     return GeneratedReply((reply * 2)[:REPLY_BYTES], tool_calls)
 
 
+NEGATIVE_WORDS = ("angry", "broken", "late", "never", "not", "refund", "wrong")
+
+
+@activity.defn
+async def analyze_sentiment(customer_text: str) -> str:
+    """Mock of a sentiment model: deterministic, local, fast."""
+    lowered_text = customer_text.lower()
+    if any(word in lowered_text for word in NEGATIVE_WORDS):
+        return "negative"
+    return "neutral"
+
+
 @activity.defn
 async def send_nudge_email(request: OutboxRequest) -> None:
     append_outbox_record("nudge", request)

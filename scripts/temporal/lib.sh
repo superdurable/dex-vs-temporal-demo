@@ -51,6 +51,7 @@ start_temporal_server() {
     >"$log_file" 2>&1 &
   SERVER_PID=$!
   STARTED_SERVER=1
+  echo "$SERVER_PID" >"$RUN_DIR/server.pid"
   for _ in $(seq 1 60); do
     if server_is_healthy; then
       return
@@ -63,9 +64,12 @@ start_temporal_server() {
 
 start_worker() {
   local log_file="$1"
+  # v1, v2 or v3: which ConversationWorkflow code the worker runs.
+  local code_version="${2:-v1}"
   stop_worker_processes
-  echo "Starting worker, log: $log_file"
-  uv run --quiet --project "$TEMPORAL_APP_DIR" python "$TEMPORAL_APP_DIR/worker.py" \
+  echo "Starting worker with ConversationWorkflow code $code_version, log: $log_file"
+  DEMO_CONVERSATION_CODE="$code_version" \
+    uv run --quiet --project "$TEMPORAL_APP_DIR" python "$TEMPORAL_APP_DIR/worker.py" \
     >"$log_file" 2>&1 &
   WORKER_PID=$!
   for _ in $(seq 1 60); do
@@ -78,6 +82,18 @@ start_worker() {
   exit 1
 }
 
+# Stops a server that an earlier script left running with KEEP=1.
+stop_kept_server() {
+  local pid_file="$RUN_DIR/server.pid"
+  [ -f "$pid_file" ] || return 0
+  local kept_pid
+  kept_pid="$(cat "$pid_file")"
+  if ps -p "$kept_pid" -o command= 2>/dev/null | grep -q "temporal server start-dev"; then
+    kill "$kept_pid" 2>/dev/null || true
+  fi
+  rm -f "$pid_file"
+}
+
 stop_worker_processes() {
   pkill -f "$TEMPORAL_APP_DIR/worker.py" 2>/dev/null || true
 }
@@ -85,12 +101,13 @@ stop_worker_processes() {
 stop_all() {
   if [ "${KEEP:-0}" = "1" ]; then
     echo "KEEP=1: leaving the server (UI http://localhost:$TEMPORAL_UI_PORT) and the worker running."
-    echo "Stop them with: pkill -f '$TEMPORAL_APP_DIR/worker.py'; pkill -f 'temporal server start-dev'"
+    echo "Stop them with: pkill -f '$TEMPORAL_APP_DIR/worker.py'; kill \$(cat '$RUN_DIR/server.pid')"
     return
   fi
   stop_worker_processes
   if [ "$STARTED_SERVER" = "1" ] && [ -n "$SERVER_PID" ]; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
+    rm -f "$RUN_DIR/server.pid"
   fi
 }

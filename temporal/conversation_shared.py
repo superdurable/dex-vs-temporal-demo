@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 TASK_QUEUE = "conversation-demo"
 NAIVE_WORKFLOW_TYPE = "NaiveConversationWorkflow"
 CORRECT_WORKFLOW_TYPE = "ConversationWorkflow"
+CONTINUE_AS_NEW_WORKFLOW_TYPE = "ConversationWorkflowWithContinueAsNew"
+SENTIMENT_PATCH_ID = "analyze-sentiment-before-reply"
 
 DEFAULT_IDLE_SECONDS = 600
 DEFAULT_CLOSE_AFTER_SECONDS = 3600
@@ -72,6 +74,8 @@ class ReplyRequest:
     conversation_id: str
     customer_sequence: int
     customer_text: str
+    # Empty when the workflow code did not run sentiment analysis.
+    sentiment: str = ""
 
 
 @dataclass
