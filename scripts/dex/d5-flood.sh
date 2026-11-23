@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# D5: flood one long-lived AI support conversation with 60,000 customer
-# messages; each customer message gets its own AI reply, in Channel order.
-# COUNT=60000 takes far longer than the 30-minute bound at about 10 replies/s.
-# Record accepted messages, wall-clock time until every message is answered,
-# final status,
-# record count, retained chunks, and the Summary, then read the newest page
-# and older pages. KEEP=1 leaves Dex running.
+# D5: flood one long-lived AI support conversation with COUNT customer
+# messages, as fast as the producer limits allow; each customer message gets
+# its own AI reply, in Channel order. COUNT=60000 takes far longer than the
+# 30-minute posting bound at about 10 replies/s. The driver reports offered,
+# acknowledged, unknown, and recorded messages, throttling, and a one-to-one
+# check of message IDs and replies, then reads the newest and oldest pages.
+# A backlog, a Flow failure, or a timeout fails the script.
+# Producer policy: see LoadRun in dex/drive.py. KEEP=1 leaves Dex running.
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 COUNT="${COUNT:-60000}"
@@ -16,26 +17,8 @@ CLOSE_AFTER_SECONDS="${CLOSE_AFTER_SECONDS:-3600}"
 CONVERSATION_ID="${CONVERSATION_ID:-d5-flood-$(date -u +%Y%m%d-%H%M%S)}"
 LOG_FILE="$RUN_DIR/d5-flood.log"
 
-trap stop_everything_unless_kept EXIT
-
-summarize_page='
-import json, sys
-page = json.load(sys.stdin)
-records = page["records"]
-print(json.dumps({
-    "page_token": page["page_token"],
-    "records": len(records),
-    "customer_records": sum(1 for r in records if r["role"] == "customer"),
-    "assistant_records": sum(1 for r in records if r["role"] == "assistant"),
-    "sequences_newest_to_oldest": [records[0]["sequence"], records[-1]["sequence"]] if records else None,
-    "next_older_page_token": page["next_older_page_token"],
-    "oldest_retained_page_token": page["oldest_retained_page_token"],
-    "is_beyond_retention": page["is_beyond_retention"],
-    "newest_two": records[:2],
-}, indent=2))
-'
-
-{
+main() {
+  ensure_python_environment
   start_dex_dev
   start_worker
 
@@ -45,27 +28,16 @@ print(json.dumps({
     --close-after-seconds "$CLOSE_AFTER_SECONDS"
   drive assign "$CONVERSATION_ID" "flood-agent"
 
-  log "flood $COUNT customer messages (rate=${RATE}, 0 is unlimited; concurrency=$CONCURRENCY)"
-  flood_status=0
-  # --max-seconds bounds the flood and the wait for replies at 30 minutes.
+  log "flood $COUNT customer messages (rate=${RATE}, 0 is unpaced; concurrency=$CONCURRENCY)"
+  local flood_status=0
+  # --max-seconds bounds the posting and, separately, the drain at 30 minutes.
   drive flood "$CONVERSATION_ID" --count "$COUNT" --rate "$RATE" \
     --concurrency "$CONCURRENCY" --max-seconds 1800 || flood_status=$?
   log "flood exit status $flood_status"
 
-  log "newest page (token current)"
-  newest_page="$(drive page "$CONVERSATION_ID" current)"
-  python3 -c "$summarize_page" <<<"$newest_page"
-
-  older_token="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["next_older_page_token"])' <<<"$newest_page")"
-  oldest_token="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["oldest_retained_page_token"])' <<<"$newest_page")"
-  for token in "$older_token" "$oldest_token"; do
-    [[ -n "$token" ]] || continue
-    log "older page $token"
-    drive page "$CONVERSATION_ID" "$token" | python3 -c "$summarize_page"
-  done
-
-  log "page older than the retention window (token 00000000000000000001)"
-  drive page "$CONVERSATION_ID" 00000000000000000001
-
+  drive pages-summary "$CONVERSATION_ID"
   echo "Dex Web: http://127.0.0.1:$WEB_PORT  (Flow ID $CONVERSATION_ID)"
-} 2>&1 | tee "$LOG_FILE"
+  return "$flood_status"
+}
+
+run_logged "$LOG_FILE" main

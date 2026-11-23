@@ -4,7 +4,8 @@
 # (30 s) starts after each reply, so the nudge lands about 30 s after the
 # second reply (about t=50 s). The close waits CLOSE_AFTER_SECONDS (default
 # 3600) after the nudge, so D1 does not wait for it.
-# KEEP=1 leaves Dex running for Dex Web.
+# Fails when the nudge does not arrive in time or lands outside the window.
+# KEEP=1 leaves Dex running for Dex Web after a successful run.
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 IDLE_SECONDS="${IDLE_SECONDS:-30}"
@@ -12,60 +13,53 @@ FOLLOW_UP_AT_SECONDS="${FOLLOW_UP_AT_SECONDS:-20}"
 CLOSE_AFTER_SECONDS="${CLOSE_AFTER_SECONDS:-3600}"
 CONVERSATION_ID="${CONVERSATION_ID:-d1-timer-$(date -u +%Y%m%d-%H%M%S)}"
 LOG_FILE="$RUN_DIR/d1-timer.log"
+PAGE_FILE="$RUN_DIR/d1-page.json"
 
-trap stop_everything_unless_kept EXIT
+monotonic_seconds() { python3 -c 'import time; print(time.monotonic())'; }
+epoch_seconds() { python3 -c 'import time; print(time.time())'; }
 
-now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
-
-{
+main() {
+  ensure_python_environment
   start_dex_dev
   start_worker
 
-  t0_ms=$(now_ms)
+  local t0_monotonic started_at start_output run_id follow_up_at
+  t0_monotonic="$(monotonic_seconds)"
+  started_at="$(epoch_seconds)"
   log "t=0  start $CONVERSATION_ID with the first message (idle ${IDLE_SECONDS}s)"
-  drive start "$CONVERSATION_ID" --first-message "Hi, my order has not arrived yet." \
-    --idle-seconds "$IDLE_SECONDS" --close-after-seconds "$CLOSE_AFTER_SECONDS"
+  start_output="$(drive start "$CONVERSATION_ID" --first-message "Hi, my order has not arrived yet." \
+    --idle-seconds "$IDLE_SECONDS" --close-after-seconds "$CLOSE_AFTER_SECONDS")"
+  echo "$start_output"
+  run_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["runId"])' <<<"$start_output")"
 
-  sleep $((FOLLOW_UP_AT_SECONDS - ($(now_ms) - t0_ms) / 1000))
-  log "t=${FOLLOW_UP_AT_SECONDS} post a follow-up customer message"
-  follow_up_ms=$(now_ms)
-  drive post "$CONVERSATION_ID" "It was due last Friday. Can you check?"
-
-  log "waiting for the nudge in $OUTBOX"
-  deadline=$((SECONDS + 2 * IDLE_SECONDS + 30))
-  until grep -q "\"conversation\": \"$CONVERSATION_ID\", \"kind\": \"nudge\"" "$OUTBOX" 2>/dev/null; do
-    if ((SECONDS > deadline)); then
-      log "timed out waiting for the nudge"
-      break
-    fi
-    sleep 1
-  done
-
-  page="$(drive page "$CONVERSATION_ID")"
-  echo
-  echo "Timeline for $CONVERSATION_ID (seconds since start; nudge expected ~${IDLE_SECONDS}s after the second reply)"
-  python3 - "$OUTBOX" "$CONVERSATION_ID" "$t0_ms" "$follow_up_ms" "$page" <<'PY'
-import json, sys
-from datetime import datetime
-outbox, conversation, t0_ms, follow_up_ms, page = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
-
-def seconds_since_start(iso_time):
-    return datetime.fromisoformat(iso_time.replace("Z", "+00:00")).timestamp() - t0_ms / 1000
-
-events = [(0.0, "start: customer first message"), ((follow_up_ms - t0_ms) / 1000, "customer follow-up posted")]
-for record in json.loads(page)["records"]:
-    if record["role"] == "assistant":
-        events.append((seconds_since_start(record["recorded_at"]), f"AI reply recorded (seq {record['sequence']}, tools {', '.join(record['tool_calls'])})  {record['recorded_at']}"))
-with open(outbox, encoding="utf-8") as lines:
-    for line in lines:
-        entry = json.loads(line)
-        if entry["conversation"] == conversation:
-            events.append((seconds_since_start(entry["time"]), f"outbox {entry['kind']} (messages={entry['messages']})  {entry['time']}"))
-for offset, text in sorted(events):
-    print(f"  t={offset:6.1f}s  {text}")
+  # Sleep until the follow-up is due on the monotonic clock; report a late follow-up.
+  python3 - "$t0_monotonic" "$FOLLOW_UP_AT_SECONDS" <<'PY'
+import sys, time
+due = float(sys.argv[1]) + float(sys.argv[2])
+remaining = due - time.monotonic()
+if remaining > 0:
+    time.sleep(remaining)
+else:
+    print(f"follow-up is {-remaining:.1f}s late", flush=True)
 PY
+  follow_up_at="$(epoch_seconds)"
+  log "t=$(python3 -c "import sys; print(round(float(sys.argv[1]) - float(sys.argv[2]), 1))" "$follow_up_at" "$started_at") post a follow-up customer message"
+  drive post "$CONVERSATION_ID" "It was due last Friday. Can you check?" --message-id follow-up-1
+
+  log "waiting for the nudge of run $run_id in $OUTBOX"
+  checks outbox --outbox "$OUTBOX" --conversation "$CONVERSATION_ID" --run-id "$run_id" \
+    --kind nudge --wait-count 1 --timeout-seconds $((2 * IDLE_SECONDS + 30)) >/dev/null
+
+  drive page "$CONVERSATION_ID" >"$PAGE_FILE"
+  echo
+  local timeline_status=0
+  checks d1-timeline --outbox "$OUTBOX" --conversation "$CONVERSATION_ID" --run-id "$run_id" \
+    --started-at "$started_at" --follow-up-at "$follow_up_at" --page-json "$PAGE_FILE" \
+    --idle-seconds "$IDLE_SECONDS" || timeline_status=$?
   echo
   drive status "$CONVERSATION_ID"
-  echo "$page"
   echo "Dex Web: http://127.0.0.1:$WEB_PORT  (Flow ID $CONVERSATION_ID)"
-} 2>&1 | tee "$LOG_FILE"
+  return "$timeline_status"
+}
+
+run_logged "$LOG_FILE" main

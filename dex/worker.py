@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import secrets
+import os
 import signal
 from pathlib import Path
 
@@ -35,7 +35,9 @@ async def run_worker() -> None:
                 max_concurrent_tasks=32,
                 # The default identity includes the machine host name, which Dex Web shows.
                 # The Flow code version in the ID shows in history which code ran a Step.
-                app_worker_id=f"demo-worker-{flow_version}-{secrets.token_hex(4)}",
+                app_worker_id=os.environ.get(
+                    "DEMO_WORKER_ID", f"demo-worker-{flow_version}"
+                ),
             ),
             # Regenerate after Flow changes: dexcli visualize support_conversation/flow.py
             # --schema-version 2.0 --json --out flow-definitions/v1/SupportConversationFlow
@@ -64,4 +66,6 @@ if __name__ == "__main__":
     )
     # Shows the Flow definition upload result at start.
     logging.getLogger("dex").setLevel(logging.INFO)
+    # Also logs an unchanged Flow definition, so d-design.sh can confirm every upload.
+    logging.getLogger("dex._flow_definition_upload").setLevel(logging.DEBUG)
     asyncio.run(run_worker())

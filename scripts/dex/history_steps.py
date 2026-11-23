@@ -3,7 +3,10 @@
 
   history_steps.py steps [--since-event N]   Step events with the Worker that ran each
   history_steps.py timing [--last N]         where the time goes per reply cycle
-  history_steps.py count                     events kept and the highest event ID
+  history_steps.py count                     size of the retained history window and the highest event ID
+
+The retained window is the recent history Dex keeps, not a running total. The
+highest event ID counts every event the run wrote. Neither counts attempts.
 """
 
 from __future__ import annotations
@@ -89,7 +92,7 @@ def print_timing(events: list[dict], last: int) -> None:
             f"{statistics.median(v[1] for v in values) * 1000:>11.1f} "
             f"{statistics.median(v[2] for v in values) * 1000:>10.1f}"
         )
-    if len(replies) > 1:
+    if len(replies) > 1 and replies[-1] > replies[0]:
         gaps = [b - a for a, b in zip(replies, replies[1:])]
         print(
             f"replies: {len(replies)}, median gap {statistics.median(gaps) * 1000:.1f} ms, "
@@ -113,7 +116,7 @@ def main() -> int:
         print_timing(events, arguments.last)
     else:
         ids = [int(e["eventId"]) for e in events]
-        print(json.dumps({"eventsKept": len(events), "lowestEventId": min(ids, default=None), "highestEventId": max(ids, default=None)}))
+        print(json.dumps({"historyEventsRetained": len(events), "lowestRetainedEventId": min(ids, default=None), "highestEventId": max(ids, default=None)}))
     return 0
 
 
