@@ -36,8 +36,23 @@ json_field() {
 import json, sys
 value = json.load(sys.stdin)
 for key in sys.argv[1].split("."):
-    value = value[key]
+    value = value[int(key)] if isinstance(value, list) else value[key]
 print(value)' "$1"
+}
+
+# The Server keeps a stored definition unless the upload is different and
+# generated later. Re-uploading the Worker's file reports UNCHANGED only when
+# the Server stores exactly that file, so Dex Web Designs shows this version.
+assert_stored_flow_definition() {
+  local version="$1" definition outcome
+  definition="$DEX_APP_DIR/flow-definitions/$version/SupportConversationFlow.json"
+  outcome="$(dexcli flow-definition upload "$definition" \
+    -server "$DEX_SERVER_ADDRESS" -timeout 30s | json_field definitions.0.outcome)"
+  if [[ "$outcome" != "UNCHANGED" ]]; then
+    log "ERROR: the Server did not store the $version Flow definition (re-upload outcome $outcome)"
+    return 1
+  fi
+  log "the Server stores the $version Flow definition"
 }
 
 main() {
@@ -72,6 +87,7 @@ main() {
   export SUPPORT_FLOW_VERSION="$V2_VERSION"
   start_worker
   grep -i "flow definition" "$(worker_log_path)" || true
+  assert_stored_flow_definition "$V2_VERSION"
 
   log "conversation A after the deploy: one more message"
   drive post "$CONVERSATION_A" "This is wrong, I need it before the weekend." --message-id a-4

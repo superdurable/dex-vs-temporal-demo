@@ -41,6 +41,7 @@ async def run_worker() -> None:
             ),
             # Regenerate after Flow changes: dexcli visualize support_conversation/flow.py
             # --schema-version 2.0 --json --out flow-definitions/v1/SupportConversationFlow
+            # Generate later versions after earlier ones: the Server keeps the newer generatedAt.
             flow_definition_paths=(str(FLOW_DEFINITIONS_DIRECTORY / flow_version),),
         ),
     )
