@@ -22,12 +22,15 @@ RATE="${RATE:-20}"
 MESSAGE_BYTES="${MESSAGE_BYTES:-200}"
 BACKLOG_TIMEOUT="${BACKLOG_TIMEOUT:-120}"
 IDLE_SECONDS="${IDLE_SECONDS:-86400}"
-LOG_FILE="${LOG_FILE:-$RUN_DIR/t6-continue-as-new.log}"
-SERVER_LOG="$RUN_DIR/t6-server.log"
+# RUN_TAG names every file of one run, so runs do not overwrite each other.
+RUN_TAG="${RUN_TAG:-t6}"
+LOG_FILE="${LOG_FILE:-$RUN_DIR/$RUN_TAG-continue-as-new.log}"
+SERVER_LOG="$RUN_DIR/$RUN_TAG-server.log"
+WORKER_LOG="$RUN_DIR/$RUN_TAG-worker.log"
 
 trap stop_all EXIT
 start_temporal_server "$SERVER_LOG"
-start_worker "$RUN_DIR/t6-worker.log" v1
+start_worker "$WORKER_LOG" v1
 
 conversation_id="t6-can-$(date +%Y%m%d-%H%M%S)"
 {
@@ -45,17 +48,27 @@ conversation_id="t6-can-$(date +%Y%m%d-%H%M%S)"
   drive runs "$conversation_id"
   echo
   echo "=== latest run"
-  drive inspect "$conversation_id" --dump "$RUN_DIR/t6-latest-run-history.json"
+  drive inspect "$conversation_id" --dump "$RUN_DIR/$RUN_TAG-latest-run-history.json"
   echo
-  echo "=== transcript check: every flood message exactly once, one reply each"
+  echo "=== transcript check by query: every flood message exactly once, one reply each"
   drive verify "$conversation_id" --flood-count "$COUNT" || true
   echo
-  echo "--- server log lines about size and count limits"
-  limit_lines="$(grep -E 'exceeds (warn|error) limit|exceeds limit|too large' "$SERVER_LOG" || true)"
+  echo "=== the same check from history (works when queries fail)"
+  drive verify-history "$conversation_id" --flood-count "$COUNT" || true
+  echo
+  echo "--- server log: blob size lines"
+  grep -E 'Blob data size' "$SERVER_LOG" | sed -E 's/ address=[^ ]+//; s/ wf-namespace=[^ ]+//; s/ shard-id=[^ ]+//' | cut -c1-400 || true
+  echo "--- server log: other limit and workflow task failure lines (first of each kind)"
+  limit_lines="$(grep -E 'exceeds (warn|error) limit|PayloadsTooLarge|Critical attempts|workflow task failed' "$SERVER_LOG" || true)"
   if [ -n "$limit_lines" ]; then
-    echo "$limit_lines" | sed -E 's/ address=[^ ]+//; s/ wf-namespace-id=[^ ]+//' | awk '!seen[$3 $4 $5 $6]++' | cut -c1-600
+    echo "$limit_lines" | sed -E 's/ address=[^ ]+//; s/ wf-namespace-id=[^ ]+//; s/ attempt=[0-9]+//' | awk '!seen[$3 $4 $5 $6 $NF]++' | cut -c1-600
     echo "($(echo "$limit_lines" | wc -l | tr -d ' ') matching lines in $SERVER_LOG)"
   fi
+  echo "--- worker log: first line of each payload, deadlock and slow-task kind, with counts"
+  for pattern in 'TMPRL1103.*warning limit' 'TMPRL1103.*error limit' 'TMPRL1101' 'TMPRL1104'; do
+    sed 's/\x1b\[[0-9;]*m//g' "$WORKER_LOG" | grep -m1 -E "$pattern" | cut -c1-400 || true
+    echo "  ($(grep -cE "$pattern" "$WORKER_LOG" || true) lines match '$pattern')"
+  done
   if [ "${WAIT_FOR_CLOSE:-0}" = "1" ]; then
     echo
     echo "--- waiting for the conversation to close (idle ${IDLE_SECONDS}s, then close ${IDLE_SECONDS}s)"

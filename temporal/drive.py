@@ -12,6 +12,7 @@ Usage (from this directory):
   uv run drive.py watch-task-retries <conversation-id> --seconds N [--interval S]
   uv run drive.py runs <conversation-id>
   uv run drive.py verify <conversation-id> --flood-count N
+  uv run drive.py verify-history <conversation-id> --flood-count N
 
 The conversation ID is the workflow ID. Set TEMPORAL_ADDRESS to reach a
 server other than localhost:7233.
@@ -244,7 +245,10 @@ async def flood_conversation(client: Client, args: argparse.Namespace) -> None:
         if accepted % FLOOD_PROGRESS_INTERVAL == 0:
             description = await handle.describe()
             try:
-                replies = (await handle.query("get_summary"))["assistant_message_count"]
+                # A short timeout keeps a slow query from bunching the next signals.
+                replies = (
+                    await asyncio.wait_for(handle.query("get_summary"), timeout=3)
+                )["assistant_message_count"]
             except Exception:
                 replies = "unknown"
             print(
@@ -360,6 +364,7 @@ async def inspect_run(
         "workflow_task_failure_causes": sorted(
             {failure["cause"] for failure in task_failures}
         ),
+        "first_workflow_task_failure": task_failures[0] if task_failures else None,
         "last_workflow_task_failure": task_failures[-1] if task_failures else None,
         "pending_workflow_task": describe_pending_workflow_task(description),
     }
@@ -505,6 +510,105 @@ async def verify_transcript(client: Client, args: argparse.Namespace) -> None:
     )
 
 
+async def verify_history(client: Client, args: argparse.Namespace) -> None:
+    """Checks flood messages and replies from the latest run's history.
+
+    The latest run's start input carries the transcript of every earlier run.
+    Its own signals and generate_reply inputs add the rest. Unlike verify, this
+    needs no query, so it also works while workflow tasks keep failing.
+    """
+    handle = client.get_workflow_handle(args.conversation_id)
+    history = await handle.fetch_history()
+    converter = client.data_converter
+
+    async def decode_first(payloads: Any) -> Any:
+        return (await converter.decode(list(payloads.payloads)))[0]
+
+    carried_transcript: list[dict[str, Any]] = []
+    carried_pending: list[int] = []
+    run_signal_texts: list[str] = []
+    run_reply_inputs: list[dict[str, Any]] = []
+    for event in history.events:
+        if event.HasField("workflow_execution_started_event_attributes"):
+            start_input = await decode_first(
+                event.workflow_execution_started_event_attributes.input
+            )
+            carried = start_input.get("carried")
+            if carried:
+                carried_transcript = carried["transcript"]
+                carried_pending = carried["pending_sequences"]
+            else:
+                run_signal_texts.append(start_input["first_message"])
+        elif event.HasField("workflow_execution_signaled_event_attributes"):
+            attributes = event.workflow_execution_signaled_event_attributes
+            if attributes.signal_name == "post_message":
+                run_signal_texts.append(await decode_first(attributes.input))
+        elif event.HasField("activity_task_scheduled_event_attributes"):
+            attributes = event.activity_task_scheduled_event_attributes
+            if attributes.activity_type.name == "generate_reply":
+                run_reply_inputs.append(await decode_first(attributes.input))
+
+    flood_index_counts: dict[int, int] = {}
+
+    def count_flood_text(text: str) -> None:
+        match = FLOOD_INDEX_PATTERN.match(text)
+        if match:
+            index = int(match.group(1))
+            flood_index_counts[index] = flood_index_counts.get(index, 0) + 1
+
+    carried_replies: dict[int, int] = {}
+    carried_customer_sequences: list[int] = []
+    for message in carried_transcript:
+        if message["role"] == "customer":
+            carried_customer_sequences.append(message["sequence"])
+            count_flood_text(message["text"])
+        else:
+            sequence = int(REPLY_SEQUENCE_PATTERN.match(message["text"]).group(1))
+            carried_replies[sequence] = carried_replies.get(sequence, 0) + 1
+    for text in run_signal_texts:
+        count_flood_text(text)
+
+    run_reply_sequences = [request["customer_sequence"] for request in run_reply_inputs]
+    run_reply_counts: dict[int, int] = {}
+    for sequence in run_reply_sequences:
+        run_reply_counts[sequence] = run_reply_counts.get(sequence, 0) + 1
+    carried_unanswered = [
+        sequence for sequence in carried_customer_sequences if sequence not in carried_replies
+    ]
+    expected_indexes = range(1, args.flood_count + 1)
+    customer_messages_accepted = len(carried_customer_sequences) + len(run_signal_texts)
+    replies_scheduled = len(carried_replies) + len(run_reply_counts)
+    print_json(
+        {
+            "conversation": args.conversation_id,
+            "latest_run_id": (await handle.describe()).run_id,
+            "carried_transcript_messages": len(carried_transcript),
+            "carried_transcript_sequences_contiguous": [
+                message["sequence"] for message in carried_transcript
+            ]
+            == list(range(1, len(carried_transcript) + 1)),
+            "carried_unanswered_equals_carried_pending": sorted(carried_unanswered)
+            == sorted(carried_pending),
+            "carried_messages_with_two_or_more_replies": sorted(
+                s for s, n in carried_replies.items() if n > 1
+            )[:20],
+            "latest_run_customer_messages": len(run_signal_texts),
+            "latest_run_generate_reply_scheduled": len(run_reply_sequences),
+            "latest_run_replies_unique": len(run_reply_counts) == len(run_reply_sequences),
+            "latest_run_replies_overlapping_carried": len(
+                set(run_reply_counts) & set(carried_replies)
+            ),
+            "flood_messages_expected": args.flood_count,
+            "flood_messages_accepted": len(flood_index_counts),
+            "flood_missing_count": sum(1 for i in expected_indexes if i not in flood_index_counts),
+            "flood_duplicated": sorted(i for i, n in flood_index_counts.items() if n > 1)[:20],
+            "customer_messages_accepted": customer_messages_accepted,
+            "customer_messages_with_reply_scheduled": replies_scheduled,
+            "customer_messages_without_reply": customer_messages_accepted - replies_scheduled,
+        }
+    )
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Temporal conversation demo driver")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -589,6 +693,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     verify.add_argument("conversation_id")
     verify.add_argument("--flood-count", type=int, required=True)
     verify.set_defaults(handler=verify_transcript)
+
+    verify_from_history = commands.add_parser(
+        "verify-history",
+        help="check flood messages and replies from the latest run's history",
+    )
+    verify_from_history.add_argument("conversation_id")
+    verify_from_history.add_argument("--flood-count", type=int, required=True)
+    verify_from_history.set_defaults(handler=verify_history)
     return parser
 
 
