@@ -99,7 +99,7 @@ Temporal, no Continue-As-New (`t5-flood.sh`):
 
 Temporal, Continue-As-New with the transcript carried inline (`t6-continue-as-new.sh`):
 
-- The workflow chains runs at the server's suggestion, about 4,100 events per run. It adds 111 lines to the correct workflow.
+- The workflow chains runs at the server's suggestion, about 4,100 events per run. Its file has 249 lines; the correct workflow has 148.
 - After 3,531 answered follow-up messages, the next run's input was 2,199,782 bytes. The limit is 2,097,152. The workflow task fails: `[TMPRL1103] Attempted to upload payloads with size that exceeded the error limit.` The workflow stays Running, keeps accepting signals, and stops replying.
 - The stop point moves with the timing of each Continue-As-New.
 - With the SDK's External Storage (Public Preview) and a local directory as the store, 10,000 messages were each answered once. The stored objects stayed after the workflow completed: Temporal does not delete them.
