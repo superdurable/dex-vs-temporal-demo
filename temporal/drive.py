@@ -72,6 +72,7 @@ WORKFLOW_TYPE_BY_VARIANT = {
 REPLY_ACTIVITY_TYPES = frozenset({"generate_reply", "generate_reply_from_context"})
 CONTEXT_REPLY_ACTIVITY_TYPE = "generate_reply_from_context"
 STALL_WORKFLOW_TASK_ATTEMPTS = 3
+STALL_WORKFLOW_TASK_FAILURES = 2
 STALL_CHECK_SECONDS = 2
 # Small pages keep each read far below gRPC message limits when events are large.
 LARGE_HISTORY_PAGE_EVENTS = 24
@@ -358,8 +359,10 @@ async def observe_flood(
         print(line, flush=True)
 
 
-async def read_latest_completed_activity_event_id(client: Client, conversation_id: str) -> int:
-    """Returns the newest ActivityTaskCompleted event ID among the last events, or 0."""
+async def read_recent_events(client: Client, conversation_id: str) -> tuple[int, list[dict[str, Any]]]:
+    """Returns the newest ActivityTaskCompleted event ID among the last
+    events (0 when there is none) and the WorkflowTaskFailed events among
+    them, newest first."""
     response = await client.workflow_service.get_workflow_execution_history_reverse(
         GetWorkflowExecutionHistoryReverseRequest(
             namespace=client.namespace,
@@ -368,14 +371,16 @@ async def read_latest_completed_activity_event_id(client: Client, conversation_i
         ),
         timeout=READ_RPC_TIMEOUT,
     )
-    return max(
+    events = list(response.history.events)
+    completed_event_id = max(
         (
             event.event_id
-            for event in response.history.events
+            for event in events
             if event.HasField("activity_task_completed_event_attributes")
         ),
         default=0,
     )
+    return completed_event_id, workflow_task_failures(events)
 
 
 async def watch_for_stall(
@@ -385,12 +390,15 @@ async def watch_for_stall(
     stall_seconds: float,
 ) -> None:
     """Stops the flood when the workflow closes, its workflow task keeps
-    failing, or no activity completes for stall_seconds.
+    failing (pending attempt 3 or more, or 2 WorkflowTaskFailed events seen
+    with no activity completed after them), or no activity completes for
+    stall_seconds.
 
     Reads describe and the newest events only; a query would make the
     worker replay a large history.
     """
     last_completed: tuple[str | None, int] = ("", 0)
+    failures_since_progress: dict[tuple[str | None, int], dict[str, Any]] = {}
     last_progress_at = time.monotonic()
     while not progress.sending_finished:
         await asyncio.sleep(STALL_CHECK_SECONDS)
@@ -407,7 +415,7 @@ async def watch_for_stall(
                         f"workflow task failing repeatedly (pending attempt {attempt})"
                     )
                 else:
-                    completed_event_id = await read_latest_completed_activity_event_id(
+                    completed_event_id, task_failures = await read_recent_events(
                         client, handle.id
                     )
                     # Event IDs restart in each run after Continue-As-New.
@@ -415,6 +423,21 @@ async def watch_for_stall(
                     if completed_event_id and latest_completed != last_completed:
                         last_completed = latest_completed
                         last_progress_at = now
+                        failures_since_progress.clear()
+                    # Under a signal flood each failure is a new attempt-1 task, so count events.
+                    newest_completed_in_run = (
+                        last_completed[1] if last_completed[0] == description.run_id else 0
+                    )
+                    for failure in task_failures:
+                        if failure["event_id"] > newest_completed_in_run:
+                            failures_since_progress[(description.run_id, failure["event_id"])] = failure
+                    if len(failures_since_progress) >= STALL_WORKFLOW_TASK_FAILURES:
+                        newest = failures_since_progress[max(failures_since_progress)]
+                        progress.stop_reason = (
+                            f"workflow task failing: {len(failures_since_progress)} "
+                            f"WorkflowTaskFailed events since the last completed activity, "
+                            f"newest cause {newest['cause']}: {newest['message'][:200]}"
+                        )
         except Exception as error:
             print(f"stall watch read error: {describe_error(error)}", flush=True)
         if not progress.stop_reason and now - last_progress_at >= stall_seconds:
@@ -1580,9 +1603,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--stop-when-stalled",
         type=non_negative_float,
         default=0,
-        help="stop sending when the workflow closes, its workflow task fails "
-        f"{STALL_WORKFLOW_TASK_ATTEMPTS} times in a row, or no activity completes "
-        "for this many seconds; 0 turns the watch off",
+        help="stop sending when the workflow closes, its workflow task keeps failing "
+        f"(pending attempt {STALL_WORKFLOW_TASK_ATTEMPTS} or more, or "
+        f"{STALL_WORKFLOW_TASK_FAILURES} WorkflowTaskFailed events with no activity "
+        "completed after them), or no activity completes for this many seconds; "
+        "0 turns the watch off",
     )
     flood.add_argument("--result-file", default="", help="write the flood counts as JSON here")
     flood.set_defaults(handler=flood_conversation)
