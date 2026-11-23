@@ -50,7 +50,7 @@ def import_flow_module(version: str) -> ModuleType:
 
 def build_support_conversation_flow(version: str) -> Flow[ReplyRequest]:
     flow_module = import_flow_module(version)
-    mailer = JsonlOutboxMailer(outbox_path_from_environment())
+    mailer = JsonlOutboxMailer(outbox_path_from_environment(run_directory_from_environment()))
     if version == "v1":
         return flow_module.SupportConversationFlow(
             mailer, LocalTranscriptSummarizer(), MockReplyGenerator()
@@ -67,10 +67,14 @@ def build_registry(flow: Flow[ReplyRequest]) -> Registry:
     return Registry([flow], allow_async_handlers=True)
 
 
+def run_directory_from_environment() -> Path:
+    """DEX_DEMO_RUN_DIR: where the process keeps every file it writes."""
+    return Path(os.environ.get("DEX_DEMO_RUN_DIR", DEFAULT_RUN_DIRECTORY))
+
+
 def open_process_blob_cache(role: str) -> tuple[BlobCache, Path]:
     """Open a disposable BlobCache directory owned by this process."""
-    run_directory = Path(os.environ.get("DEX_DEMO_RUN_DIR", DEFAULT_RUN_DIRECTORY))
-    cache_directory = run_directory / "blob-cache" / f"{role}-{os.getpid()}"
+    cache_directory = run_directory_from_environment() / "blob-cache" / f"{role}-{os.getpid()}"
     cache_directory.mkdir(parents=True, exist_ok=True)
     cache = open_blob_cache(BlobCacheConfig(str(cache_directory), BLOB_CACHE_BYTES))
     return cache, cache_directory
