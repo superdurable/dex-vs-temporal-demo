@@ -72,7 +72,7 @@ FLOOD_BACKLOG_TIMEOUT_SECONDS = 900
 SIGNAL_RPC_TIMEOUT = timedelta(seconds=10)
 READ_RPC_TIMEOUT = timedelta(seconds=30)
 QUERY_TIMEOUT = timedelta(seconds=10)
-EXTERNAL_STORAGE_REFERENCE_KEY = "__temporal_external_storage_reference"
+EXTERNAL_STORAGE_REFERENCE_MESSAGE_TYPE = "temporal.api.sdk.v1.ExternalStorageReference"
 
 EXIT_OK = 0
 EXIT_OBSERVATION_FAILED = 1
@@ -558,9 +558,9 @@ def workflow_task_failures(events: list[HistoryEvent]) -> list[dict[str, Any]]:
 def count_external_storage_references(events: list[HistoryEvent]) -> int:
     """Counts payloads in history that are External Storage references.
 
-    Each reference payload carries the marker metadata key exactly once.
+    Each reference payload names its message type in metadata exactly once.
     """
-    marker = EXTERNAL_STORAGE_REFERENCE_KEY.encode()
+    marker = EXTERNAL_STORAGE_REFERENCE_MESSAGE_TYPE.encode()
     return sum(event.SerializeToString().count(marker) for event in events)
 
 
