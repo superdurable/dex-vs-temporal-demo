@@ -1,18 +1,9 @@
-"""Conversation state and the sequentially chunked transcript with a retention window."""
+"""Data models of the conversation and the chunked transcript; no Dex resources here."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Protocol
-
-from dex import (
-    Attribute,
-    AttributeMap,
-    AttributeMapLoad,
-    Channel,
-    Context,
-    StepOptions,
-)
 
 CURRENT_CHUNK_TOKEN = "current"
 TRANSCRIPT_CHUNK_SIZE = 100
@@ -91,13 +82,6 @@ class TranscriptPage:
     oldest_retained_page_token: str = ""
 
 
-CUSTOMER_MESSAGES = Channel("CustomerMessages", str)
-CONVERSATION_STATE = Attribute("ConversationState", ConversationState)
-ASSIGNED_AGENT = Attribute("AssignedAgent", str)
-SUMMARY = Attribute("Summary", TranscriptSummary)
-TRANSCRIPT_CHUNKS = AttributeMap("TranscriptChunks", TranscriptChunk)
-
-
 class TranscriptSummarizer(Protocol):
     def fold_chunk_into_summary(
         self, summary: TranscriptSummary | None, chunk: TranscriptChunk
@@ -160,72 +144,52 @@ def next_evicted_chunk_token(state: ConversationState) -> str:
     return state.oldest_archived_chunk_token
 
 
-def transcript_writer_step_options(state: ConversationState | None) -> StepOptions:
-    """Options of the transcript writer: load "current" and the chunk it may evict.
+@dataclass
+class TranscriptAppend:
+    """What the transcript writer must store after appending records."""
 
-    One execution appends at most TRANSCRIPT_CHUNK_SIZE records, so it archives
-    at most one chunk and evicts at most one chunk.
-    """
-    loads: list[AttributeMapLoad] = [TRANSCRIPT_CHUNKS.load(CURRENT_CHUNK_TOKEN)]
-    if state is not None:
-        evicted_token = next_evicted_chunk_token(state)
-        if evicted_token:
-            loads.append(TRANSCRIPT_CHUNKS.load(evicted_token))
-    return StepOptions(execute_load_attribute_map_instances=tuple(loads))
+    current_chunk: TranscriptChunk
+    archived_chunk_token: str = ""
+    archived_chunk: TranscriptChunk | None = None
+    evicted_chunk_token: str = ""
 
 
-def append_records_to_transcript(
-    context: Context,
+def append_records_to_chunk(
+    state: ConversationState,
+    current_chunk: TranscriptChunk,
     records: list[TranscriptRecord],
-    summarizer: TranscriptSummarizer,
-) -> ConversationState:
-    """Append records in order; archive a full chunk; evict the oldest beyond the window.
+) -> TranscriptAppend:
+    """Assign sequences and append records; archive a full chunk; pick the chunk to evict.
 
-    Each record's sequence is assigned here. At most TRANSCRIPT_CHUNK_SIZE records.
+    Updates ``state`` in place. Takes at most TRANSCRIPT_CHUNK_SIZE records, so
+    it archives at most one chunk and evicts at most one chunk.
     """
     if len(records) > TRANSCRIPT_CHUNK_SIZE:
         raise ValueError(f"at most {TRANSCRIPT_CHUNK_SIZE} records per append")
-    state = CONVERSATION_STATE.get(context)
-    current_chunk = TRANSCRIPT_CHUNKS.get(context, CURRENT_CHUNK_TOKEN)
+    result = TranscriptAppend(current_chunk)
     for record in records:
         record.sequence = state.next_sequence
-        current_chunk.records.append(record)
+        result.current_chunk.records.append(record)
         state.next_sequence += 1
         if record.role == ROLE_CUSTOMER:
             state.customer_message_count += 1
         else:
             state.assistant_reply_count += 1
-        if len(current_chunk.records) < TRANSCRIPT_CHUNK_SIZE:
+        if len(result.current_chunk.records) < TRANSCRIPT_CHUNK_SIZE:
             continue
-        token = archived_chunk_token(current_chunk.records[0].sequence)
-        TRANSCRIPT_CHUNKS.set(context, token, current_chunk)
+        token = archived_chunk_token(result.current_chunk.records[0].sequence)
+        result.archived_chunk_token = token
+        result.archived_chunk = result.current_chunk
+        result.current_chunk = TranscriptChunk()
         state.newest_archived_chunk_token = token
         if not state.oldest_archived_chunk_token:
             state.oldest_archived_chunk_token = token
-        current_chunk = TranscriptChunk()
         if count_retained_archived_chunks(state) > RETAINED_ARCHIVED_CHUNKS:
-            evict_oldest_archived_chunk(context, state, summarizer)
-    TRANSCRIPT_CHUNKS.set(context, CURRENT_CHUNK_TOKEN, current_chunk)
-    CONVERSATION_STATE.set(context, state)
-    return state
-
-
-def evict_oldest_archived_chunk(
-    context: Context,
-    state: ConversationState,
-    summarizer: TranscriptSummarizer,
-) -> None:
-    oldest_token = state.oldest_archived_chunk_token
-    # Loaded through the per-movement options built by transcript_writer_step_options.
-    evicted_chunk = TRANSCRIPT_CHUNKS.get(context, oldest_token)
-    SUMMARY.set(
-        context,
-        summarizer.fold_chunk_into_summary(SUMMARY.get(context), evicted_chunk),
-    )
-    TRANSCRIPT_CHUNKS.delete(context, oldest_token)
-    state.oldest_archived_chunk_token = archived_chunk_token(
-        int(oldest_token) + TRANSCRIPT_CHUNK_SIZE
-    )
+            result.evicted_chunk_token = state.oldest_archived_chunk_token
+            state.oldest_archived_chunk_token = archived_chunk_token(
+                int(result.evicted_chunk_token) + TRANSCRIPT_CHUNK_SIZE
+            )
+    return result
 
 
 def parse_transcript_page_token(page_token: str) -> str:

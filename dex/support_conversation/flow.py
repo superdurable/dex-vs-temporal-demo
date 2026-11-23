@@ -5,6 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from dex import (
+    Attribute,
+    AttributeMap,
+    AttributeMapLoad,
+    Channel,
     Context,
     Flow,
     PersistenceSchema,
@@ -25,28 +29,34 @@ from dex import (
 from support_conversation.mailer import ConversationMailer
 from support_conversation.reply_generator import ReplyGenerator
 from support_conversation.transcript import (
-    ASSIGNED_AGENT,
-    CONVERSATION_STATE,
     CURRENT_CHUNK_TOKEN,
-    CUSTOMER_MESSAGES,
     ROLE_ASSISTANT,
     ROLE_CUSTOMER,
     STATUS_CLOSED,
     STATUS_NUDGED,
     STATUS_WAITING,
-    SUMMARY,
     TRANSCRIPT_CHUNK_SIZE,
-    TRANSCRIPT_CHUNKS,
     ConversationSettings,
+    ConversationState,
     ReplyRequest,
+    TranscriptChunk,
     TranscriptPage,
     TranscriptRecord,
     TranscriptSummarizer,
-    append_records_to_transcript,
+    TranscriptSummary,
+    append_records_to_chunk,
     archived_chunk_token,
+    next_evicted_chunk_token,
     parse_transcript_page_token,
-    transcript_writer_step_options,
 )
+
+# --- Schema: Channel, Attributes, AttributeMap ---
+
+CUSTOMER_MESSAGES = Channel("CustomerMessages", str)
+CONVERSATION_STATE = Attribute("ConversationState", ConversationState)
+ASSIGNED_AGENT = Attribute("AssignedAgent", str)
+SUMMARY = Attribute("Summary", TranscriptSummary)
+TRANSCRIPT_CHUNKS = AttributeMap("TranscriptChunks", TranscriptChunk)
 
 MAX_MESSAGE_CHARACTERS = 4000
 MAX_AGENT_NAME_CHARACTERS = 200
@@ -54,9 +64,33 @@ MAX_AGENT_NAME_CHARACTERS = 200
 # never appends more than one chunk of records.
 MAX_MESSAGES_PER_REPLY = TRANSCRIPT_CHUNK_SIZE - 1
 
+# --- Transcript chunk helpers ---
 # GenerateReplyStep is the only transcript writer, and Steps of one conversation
 # run one at a time, so no transcript chunk needs a lock. Every movement into
 # GenerateReplyStep carries options that also load the chunk it may evict.
+
+
+def transcript_writer_step_options(state: ConversationState | None) -> StepOptions:
+    """Options of the transcript writer: load "current" and the chunk it may evict.
+
+    One execution appends at most TRANSCRIPT_CHUNK_SIZE records, so it archives
+    at most one chunk and evicts at most one chunk.
+    """
+    loads: list[AttributeMapLoad] = [TRANSCRIPT_CHUNKS.load(CURRENT_CHUNK_TOKEN)]
+    if state is not None:
+        evicted_token = next_evicted_chunk_token(state)
+        if evicted_token:
+            loads.append(TRANSCRIPT_CHUNKS.load(evicted_token))
+    return StepOptions(execute_load_attribute_map_instances=tuple(loads))
+
+
+def utc_timestamp() -> str:
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    )
+
+
+# --- Steps ---
 
 
 # dex:group group-id:conversation group-label:"Conversation"
@@ -85,7 +119,25 @@ class GenerateReplyStep(Step[ReplyRequest]):
                 0, ROLE_ASSISTANT, reply.text, reply.tool_calls, recorded_at
             )
         )
-        state = append_records_to_transcript(context, records, self.summarizer)
+        state = CONVERSATION_STATE.get(context)
+        appended = append_records_to_chunk(
+            state, TRANSCRIPT_CHUNKS.get(context, CURRENT_CHUNK_TOKEN), records
+        )
+        if appended.archived_chunk is not None:
+            TRANSCRIPT_CHUNKS.set(
+                context, appended.archived_chunk_token, appended.archived_chunk
+            )
+        if appended.evicted_chunk_token:
+            # Loaded through the movement options built by transcript_writer_step_options.
+            evicted_chunk = TRANSCRIPT_CHUNKS.get(context, appended.evicted_chunk_token)
+            SUMMARY.set(
+                context,
+                self.summarizer.fold_chunk_into_summary(
+                    SUMMARY.get(context), evicted_chunk
+                ),
+            )
+            TRANSCRIPT_CHUNKS.delete(context, appended.evicted_chunk_token)
+        TRANSCRIPT_CHUNKS.set(context, CURRENT_CHUNK_TOKEN, appended.current_chunk)
         state.status = STATUS_WAITING
         CONVERSATION_STATE.set(context, state)
         return go_to(WaitForCustomerStep, input.settings)
@@ -173,10 +225,7 @@ class CloseConversationStep(Step[ConversationSettings]):
         )
 
 
-def utc_timestamp() -> str:
-    return (
-        datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    )
+# --- Flow, persistence schema, and RPCs ---
 
 
 class SupportConversationFlow(Flow[ReplyRequest]):

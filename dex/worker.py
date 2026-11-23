@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import signal
 from pathlib import Path
 
@@ -50,4 +51,9 @@ async def run_worker() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+    )
+    # Shows the Flow definition upload result at start.
+    logging.getLogger("dex").setLevel(logging.INFO)
     asyncio.run(run_worker())

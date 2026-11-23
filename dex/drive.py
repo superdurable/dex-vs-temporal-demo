@@ -42,13 +42,15 @@ from support_conversation.app import (
     open_process_blob_cache,
     server_address_from_environment,
 )
-from support_conversation.flow import SupportConversationFlow
-from support_conversation.transcript import (
+from support_conversation.flow import (
     ASSIGNED_AGENT,
     CONVERSATION_STATE,
-    CURRENT_CHUNK_TOKEN,
     SUMMARY,
     TRANSCRIPT_CHUNKS,
+    SupportConversationFlow,
+)
+from support_conversation.transcript import (
+    CURRENT_CHUNK_TOKEN,
     ConversationSettings,
     ReplyRequest,
     ConversationState,
