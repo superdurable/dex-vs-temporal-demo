@@ -8,6 +8,7 @@ Usage (from this directory):
   uv run --locked drive.py status <conversation-id>
   uv run --locked drive.py flood <conversation-id> --count N --rate R [--message-bytes B] [--backlog-timeout S] [--stop-when-stalled S] [--result-file F]
   uv run --locked drive.py context-report <conversation-id> [--output F]
+Any command accepts --command-timeout S before the command name.
   uv run --locked drive.py inspect <conversation-id> [--run-id R] [--dump history.json]
   uv run --locked drive.py wait-replies <conversation-id> --count N [--timeout S] [--expect reply|stall] [--failure-cause C] [--expect-patch-marker]
   uv run --locked drive.py watch-task-retries <conversation-id> --seconds N [--interval S]
@@ -76,6 +77,7 @@ STALL_WORKFLOW_TASK_FAILURES = 2
 STALL_CHECK_SECONDS = 2
 # Small pages keep each read far below gRPC message limits when events are large.
 LARGE_HISTORY_PAGE_EVENTS = 24
+STALL_SCAN_MAX_PAGES = 200
 PAYLOAD_WARNING_BYTES = 512 * 1024
 PAYLOAD_ERROR_BYTES = 2 * 1024 * 1024
 HISTORY_SIZE_WARNING_BYTES = 10 * 1024 * 1024
@@ -168,6 +170,7 @@ async def start_conversation(client: Client, args: argparse.Namespace) -> int:
         ),
         id=args.conversation_id,
         task_queue=TASK_QUEUE,
+        rpc_timeout=READ_RPC_TIMEOUT,
     )
     print_json(
         {
@@ -325,9 +328,11 @@ class FloodProgress:
     rejection: dict[str, Any] | None = None
     max_schedule_lag_seconds: float = 0.0
     sending_finished: bool = False
-    # Set by the stall watch; the sending loop stops when it is not empty.
+    # Set by the stall watch, which also sets stop_requested to wake the sending loop.
     stop_reason: str = ""
     stopped_at: float = 0.0
+    stop_requested: asyncio.Event = field(default_factory=asyncio.Event)
+    send_loop_stop: str = ""
 
 
 async def observe_flood(
@@ -359,28 +364,48 @@ async def observe_flood(
         print(line, flush=True)
 
 
-async def read_recent_events(client: Client, conversation_id: str) -> tuple[int, list[dict[str, Any]]]:
-    """Returns the newest ActivityTaskCompleted event ID among the last
-    events (0 when there is none) and the WorkflowTaskFailed events among
-    them, newest first."""
-    response = await client.workflow_service.get_workflow_execution_history_reverse(
-        GetWorkflowExecutionHistoryReverseRequest(
-            namespace=client.namespace,
-            execution=WorkflowExecution(workflow_id=conversation_id),
-            maximum_page_size=LARGE_HISTORY_PAGE_EVENTS,
-        ),
-        timeout=READ_RPC_TIMEOUT,
-    )
-    events = list(response.history.events)
-    completed_event_id = max(
-        (
-            event.event_id
-            for event in events
-            if event.HasField("activity_task_completed_event_attributes")
-        ),
-        default=0,
-    )
-    return completed_event_id, workflow_task_failures(events)
+@dataclass
+class EventsSinceCursor:
+    newest_event_id: int
+    # Newest ActivityTaskCompleted after the cursor; 0 when none.
+    completed_event_id: int
+    # WorkflowTaskFailed events after the cursor and after completed_event_id.
+    task_failures: list[dict[str, Any]]
+
+
+async def read_events_since(
+    client: Client, conversation_id: str, run_id: str, cursor_event_id: int
+) -> EventsSinceCursor | None:
+    """Reads one run's history newest first, back to cursor_event_id or to
+    the newest ActivityTaskCompleted, whichever comes first.
+
+    Returns None when STALL_SCAN_MAX_PAGES pages did not reach either, so
+    the caller cannot tell progress from no progress.
+    """
+    newest_event_id = 0
+    failures: list[dict[str, Any]] = []
+    page_token = b""
+    for _ in range(STALL_SCAN_MAX_PAGES):
+        response = await client.workflow_service.get_workflow_execution_history_reverse(
+            GetWorkflowExecutionHistoryReverseRequest(
+                namespace=client.namespace,
+                execution=WorkflowExecution(workflow_id=conversation_id, run_id=run_id),
+                maximum_page_size=LARGE_HISTORY_PAGE_EVENTS,
+                next_page_token=page_token,
+            ),
+            timeout=READ_RPC_TIMEOUT,
+        )
+        for event in response.history.events:
+            newest_event_id = newest_event_id or event.event_id
+            if event.event_id <= cursor_event_id:
+                return EventsSinceCursor(newest_event_id, 0, failures)
+            if event.HasField("activity_task_completed_event_attributes"):
+                return EventsSinceCursor(newest_event_id, event.event_id, failures)
+            failures.extend(workflow_task_failures([event]))
+        page_token = response.next_page_token
+        if not page_token:
+            return EventsSinceCursor(newest_event_id, 0, failures)
+    return None
 
 
 async def watch_for_stall(
@@ -394,43 +419,51 @@ async def watch_for_stall(
     with no activity completed after them), or no activity completes for
     stall_seconds.
 
-    Reads describe and the newest events only; a query would make the
-    worker replay a large history.
+    Reads describe and the events after its cursor only; a query would
+    make the worker replay a large history. "No progress" is declared only
+    after a read that covered every event since the last progress; reads
+    that fail for stall_seconds stop the flood with their own reason.
     """
-    last_completed: tuple[str | None, int] = ("", 0)
-    failures_since_progress: dict[tuple[str | None, int], dict[str, Any]] = {}
+    cursor_run_id = ""
+    cursor_event_id = 0
+    failures_since_progress: dict[int, dict[str, Any]] = {}
     last_progress_at = time.monotonic()
+    unreadable_since: float | None = None
+    last_read_error = ""
     while not progress.sending_finished:
         await asyncio.sleep(STALL_CHECK_SECONDS)
         now = time.monotonic()
+        observed = False
         try:
             description = await handle.describe(rpc_timeout=READ_RPC_TIMEOUT)
             status = description.status.name if description.status else "UNKNOWN"
+            attempt = describe_pending_workflow_task(description).get("attempt", 0)
             if status != "RUNNING":
                 progress.stop_reason = f"workflow status {status}"
+            elif attempt >= STALL_WORKFLOW_TASK_ATTEMPTS:
+                progress.stop_reason = f"workflow task failing repeatedly (pending attempt {attempt})"
             else:
-                attempt = describe_pending_workflow_task(description).get("attempt", 0)
-                if attempt >= STALL_WORKFLOW_TASK_ATTEMPTS:
-                    progress.stop_reason = (
-                        f"workflow task failing repeatedly (pending attempt {attempt})"
+                if description.run_id != cursor_run_id:
+                    # Event IDs restart in each run after Continue-As-New.
+                    cursor_run_id = description.run_id
+                    cursor_event_id = 0
+                    failures_since_progress.clear()
+                events = await read_events_since(
+                    client, handle.id, cursor_run_id, cursor_event_id
+                )
+                if events is None:
+                    last_read_error = (
+                        f"{STALL_SCAN_MAX_PAGES} history pages did not reach the cursor"
                     )
                 else:
-                    completed_event_id, task_failures = await read_recent_events(
-                        client, handle.id
-                    )
-                    # Event IDs restart in each run after Continue-As-New.
-                    latest_completed = (description.run_id, completed_event_id)
-                    if completed_event_id and latest_completed != last_completed:
-                        last_completed = latest_completed
+                    observed = True
+                    if events.completed_event_id:
                         last_progress_at = now
                         failures_since_progress.clear()
                     # Under a signal flood each failure is a new attempt-1 task, so count events.
-                    newest_completed_in_run = (
-                        last_completed[1] if last_completed[0] == description.run_id else 0
-                    )
-                    for failure in task_failures:
-                        if failure["event_id"] > newest_completed_in_run:
-                            failures_since_progress[(description.run_id, failure["event_id"])] = failure
+                    for failure in events.task_failures:
+                        failures_since_progress[failure["event_id"]] = failure
+                    cursor_event_id = max(cursor_event_id, events.newest_event_id)
                     if len(failures_since_progress) >= STALL_WORKFLOW_TASK_FAILURES:
                         newest = failures_since_progress[max(failures_since_progress)]
                         progress.stop_reason = (
@@ -438,11 +471,26 @@ async def watch_for_stall(
                             f"WorkflowTaskFailed events since the last completed activity, "
                             f"newest cause {newest['cause']}: {newest['message'][:200]}"
                         )
+                    elif now - last_progress_at >= stall_seconds:
+                        progress.stop_reason = (
+                            f"confirmed no activity completed for {now - last_progress_at:.0f}s"
+                        )
+            if progress.stop_reason:
+                observed = True
         except Exception as error:
-            print(f"stall watch read error: {describe_error(error)}", flush=True)
-        if not progress.stop_reason and now - last_progress_at >= stall_seconds:
-            progress.stop_reason = f"no activity completed for {stall_seconds:.0f}s"
+            last_read_error = describe_error(error)
+            print(f"stall watch read error: {last_read_error}", flush=True)
+        if observed:
+            unreadable_since = None
+        else:
+            unreadable_since = unreadable_since or now
+            if now - unreadable_since >= stall_seconds:
+                progress.stop_reason = (
+                    f"observation failed: the stall watch could not read the workflow for "
+                    f"{now - unreadable_since:.0f}s; last error: {last_read_error}"
+                )
         if progress.stop_reason:
+            progress.stop_requested.set()
             progress.stopped_at = now
             print(
                 f"STALL WATCH stops the flood: {progress.stop_reason} "
@@ -519,18 +567,30 @@ async def flood_conversation(client: Client, args: argparse.Namespace) -> int:
         if args.stop_when_stalled > 0
         else None
     )
+    send_deadline = (
+        progress.started_at + args.max_seconds if args.max_seconds > 0 else float("inf")
+    )
+    progress.send_loop_stop = "target reached"
     for index in range(1, args.count + 1):
-        if progress.stop_reason:
-            break
         if args.rate > 0:
             scheduled_at = progress.started_at + (index - 1) / args.rate
-            delay = scheduled_at - time.monotonic()
+            delay = min(scheduled_at, send_deadline) - time.monotonic()
             if delay > 0:
-                await asyncio.sleep(delay)
+                # The stall watch wakes this wait, so no signal is sent after it stops the flood.
+                try:
+                    await asyncio.wait_for(progress.stop_requested.wait(), delay)
+                except asyncio.TimeoutError:
+                    pass
             else:
                 progress.max_schedule_lag_seconds = max(
                     progress.max_schedule_lag_seconds, -delay
                 )
+        if progress.stop_reason:
+            progress.send_loop_stop = f"stall watch: {progress.stop_reason}"
+            break
+        if time.monotonic() >= send_deadline:
+            progress.send_loop_stop = f"send phase deadline of {args.max_seconds:.0f}s"
+            break
         progress.rpc_attempts += 1
         try:
             await handle.signal(
@@ -546,6 +606,7 @@ async def flood_conversation(client: Client, args: argparse.Namespace) -> int:
                 )
                 continue
             progress.rejection = {"index": index, "error": describe_error(error)}
+            progress.send_loop_stop = f"signal rejected: flood message {index}"
             break
         progress.acknowledged.append(index)
     progress.sending_finished = True
@@ -581,6 +642,7 @@ async def flood_conversation(client: Client, args: argparse.Namespace) -> int:
         "client_timeouts": progress.client_timeouts,
         "rejection": progress.rejection,
         "stall_watch_stop_reason": progress.stop_reason,
+        "send_loop_stop": progress.send_loop_stop,
         "elapsed_seconds": round(elapsed, 3),
         "achieved_rate_per_second": round(progress.rpc_attempts / elapsed, 2) if elapsed else 0,
         "max_schedule_lag_seconds": round(progress.max_schedule_lag_seconds, 3),
@@ -592,6 +654,7 @@ async def flood_conversation(client: Client, args: argparse.Namespace) -> int:
         f"rejected={'1 (message ' + str(progress.rejection['index']) + ')' if progress.rejection else 0} "
         f"elapsed={elapsed:.1f}s achieved_rate={result['achieved_rate_per_second']}/s "
         f"max_schedule_lag={result['max_schedule_lag_seconds']}s "
+        + f"send_loop_stop=({progress.send_loop_stop}) "
         + (f"stall_watch_stop=({progress.stop_reason}) " if progress.stop_reason else "")
         + "(flood counts exclude the first message, which arrived with the start)",
         flush=True,
@@ -1545,6 +1608,12 @@ async def print_timeline(client: Client, args: argparse.Namespace) -> int:
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Temporal conversation demo driver")
+    parser.add_argument(
+        "--command-timeout",
+        type=non_negative_float,
+        default=0,
+        help="fail the command when it has no result after this many seconds; 0 means no limit",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     start = commands.add_parser("start", help="start a conversation workflow")
@@ -1608,6 +1677,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         f"{STALL_WORKFLOW_TASK_FAILURES} WorkflowTaskFailed events with no activity "
         "completed after them), or no activity completes for this many seconds; "
         "0 turns the watch off",
+    )
+    flood.add_argument(
+        "--max-seconds",
+        type=non_negative_float,
+        default=0,
+        help="stop sending after this many seconds; 0 means no limit",
     )
     flood.add_argument("--result-file", default="", help="write the flood counts as JSON here")
     flood.set_defaults(handler=flood_conversation)
@@ -1691,11 +1766,23 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def connect_and_run(args: argparse.Namespace) -> int:
+    client = await connect_client()
+    return await args.handler(client, args)
+
+
 async def main() -> int:
     args = build_argument_parser().parse_args()
     try:
-        client = await connect_client()
-        return await args.handler(client, args)
+        if args.command_timeout > 0:
+            return await asyncio.wait_for(connect_and_run(args), args.command_timeout)
+        return await connect_and_run(args)
+    except asyncio.TimeoutError:
+        print(
+            f"error ({args.command}): no result within --command-timeout {args.command_timeout:.0f}s",
+            file=sys.stderr,
+        )
+        return EXIT_OBSERVATION_FAILED
     except Exception as error:
         # For post and assign this is the command's own failure, such as a closed workflow.
         print(f"error ({args.command}): {describe_error(error)}", file=sys.stderr)

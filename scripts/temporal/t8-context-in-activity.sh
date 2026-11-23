@@ -10,17 +10,30 @@
 #   RATE           flood messages per second (default 8)
 #   MESSAGE_BYTES  size of each flood message (default 200)
 #   STALL_SECONDS  stop when no activity completes for this long (default 60)
+#   FLOOD_MAX_SECONDS  stop sending after this long (default 1500)
 #   RUN_TAG        names every file of one run (default t8-context)
 #   KEEP=1         leave the server running
+# Refuses to run with DEMO_EXTERNAL_STORAGE_DIR set: External Storage would
+# change what history records. Stops only the server and worker it started.
 # Raw output: $RUN_DIR/$RUN_TAG.log, flood counts $RUN_DIR/$RUN_TAG-flood-result.json,
 # final state $RUN_DIR/$RUN_TAG-report.json
 set -euo pipefail
+if [ -n "${DEMO_EXTERNAL_STORAGE_DIR:-}" ]; then
+  echo "DEMO_EXTERNAL_STORAGE_DIR is set; T8 measures history without External Storage. Unset it and run again." >&2
+  exit 1
+fi
+export PRIVATE_PIDS=1
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 COUNT="${COUNT:-12000}"
 RATE="${RATE:-8}"
 MESSAGE_BYTES="${MESSAGE_BYTES:-200}"
 STALL_SECONDS="${STALL_SECONDS:-60}"
+FLOOD_MAX_SECONDS="${FLOOD_MAX_SECONDS:-1500}"
+# Hard limits per phase, in seconds, so the exit trap always runs.
+SHORT_PHASE_SECONDS=60
+FLOOD_PHASE_SECONDS=$((FLOOD_MAX_SECONDS + 120))
+REPORT_PHASE_SECONDS=300
 IDLE_SECONDS=86400
 RUN_TAG="${RUN_TAG:-t8-context}"
 LOG_FILE="${LOG_FILE:-$RUN_DIR/$RUN_TAG.log}"
@@ -28,6 +41,38 @@ SERVER_LOG="$RUN_DIR/$RUN_TAG-server.log"
 WORKER_LOG="$RUN_DIR/$RUN_TAG-worker.log"
 RESULT_FILE="$RUN_DIR/$RUN_TAG-flood-result.json"
 REPORT_FILE="$RUN_DIR/$RUN_TAG-report.json"
+
+# Usage: run_with_deadline <seconds> <command...>
+# Runs the command; stops it and returns 124 when it is still running after <seconds>.
+run_with_deadline() {
+  local seconds="$1"
+  shift
+  "$@" &
+  local command_pid="$!"
+  local deadline=$((SECONDS + seconds))
+  while kill -0 "$command_pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "DEADLINE: no result within ${seconds}s from: $*" >&2
+      stop_process_tree "$command_pid" "timed-out command" >&2
+      wait "$command_pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.5
+  done
+  wait "$command_pid"
+}
+
+describe_workflow() {
+  temporal workflow describe --address "$TEMPORAL_ADDRESS" -w "$1" -o json \
+    | python3 -c '
+import json, sys
+info = json.load(sys.stdin)["workflowExecutionInfo"]
+for key in ("type", "status", "startTime", "closeTime", "historyLength", "historySizeBytes"):
+    value = info.get(key)
+    if isinstance(value, dict):
+        value = value.get("name")
+    print(f"{key}: {value}")'
+}
 
 trap stop_all EXIT
 start_temporal_server "$SERVER_LOG" fresh
@@ -39,29 +84,27 @@ conversation_id="t8-context-$(date +%Y%m%d-%H%M%S)"
   echo "=== T8 context in the activity input: $conversation_id"
   echo "    target $COUNT flood messages, rate ${RATE}/s, message $MESSAGE_BYTES bytes, stall watch ${STALL_SECONDS}s"
   echo "server: fresh temporal server start-dev with no dynamic config overrides"
-  drive start "$conversation_id" --variant context-in-activity \
+  echo "external storage: off (DEMO_EXTERNAL_STORAGE_DIR is not set); payloads use the default JSON converter"
+  run_with_deadline "$SHORT_PHASE_SECONDS" drive --command-timeout "$SHORT_PHASE_SECONDS" \
+    start "$conversation_id" --variant context-in-activity \
     --first-message "Hi, I need help with my order." \
     --idle-seconds "$IDLE_SECONDS" --close-after-seconds "$IDLE_SECONDS"
-  drive assign "$conversation_id" "Avery"
-  drive flood "$conversation_id" --count "$COUNT" --rate "$RATE" \
+  run_with_deadline "$SHORT_PHASE_SECONDS" drive --command-timeout "$SHORT_PHASE_SECONDS" \
+    assign "$conversation_id" "Avery"
+  run_with_deadline "$FLOOD_PHASE_SECONDS" drive --command-timeout "$((FLOOD_MAX_SECONDS + 60))" \
+    flood "$conversation_id" --count "$COUNT" --rate "$RATE" \
     --message-bytes "$MESSAGE_BYTES" --backlog-timeout 0 --progress-seconds 5 \
-    --stop-when-stalled "$STALL_SECONDS" --result-file "$RESULT_FILE"
+    --stop-when-stalled "$STALL_SECONDS" --max-seconds "$FLOOD_MAX_SECONDS" \
+    --result-file "$RESULT_FILE"
 
   echo
   echo "=== temporal workflow describe"
-  temporal workflow describe --address "$TEMPORAL_ADDRESS" -w "$conversation_id" -o json \
-    | python3 -c '
-import json, sys
-info = json.load(sys.stdin)["workflowExecutionInfo"]
-for key in ("type", "status", "startTime", "closeTime", "historyLength", "historySizeBytes"):
-    value = info.get(key)
-    if isinstance(value, dict):
-        value = value.get("name")
-    print(f"{key}: {value}")'
+  run_with_deadline "$SHORT_PHASE_SECONDS" describe_workflow "$conversation_id"
 
   echo
   echo "=== final state, read from history in small pages (saved to $REPORT_FILE)"
-  drive context-report "$conversation_id" --output "$REPORT_FILE" >/dev/null
+  run_with_deadline "$REPORT_PHASE_SECONDS" drive --command-timeout "$REPORT_PHASE_SECONDS" \
+    context-report "$conversation_id" --output "$REPORT_FILE" >/dev/null
   python3 - "$RESULT_FILE" "$REPORT_FILE" <<'REPORT'
 import json, sys
 flood = json.load(open(sys.argv[1]))
@@ -69,7 +112,9 @@ report = json.load(open(sys.argv[2]))
 rejection = flood["rejection"]
 print(f"flood: {flood['acknowledged_count']} acknowledged, {flood['client_timeout_count']} client timeouts, "
       f"{flood['elapsed_seconds']} s, achieved {flood['achieved_rate_per_second']}/s")
-print(f"flood stopped by:                 {'rejection of flood message ' + str(rejection['index']) + ': ' + rejection['error'] if rejection else (flood['stall_watch_stop_reason'] or 'reaching the target')}")
+print(f"send loop stopped by:             {flood['send_loop_stop']}")
+print(f"stall watch stop reason:          {flood['stall_watch_stop_reason'] or '-'}")
+print(f"rejected signal:                  {'flood message ' + str(rejection['index']) + ': ' + rejection['error'] if rejection else '-'}")
 print(f"follow-up messages accepted:      {report['followup_messages_accepted']} (post_message signals in history)")
 print(f"follow-up messages answered:      {report['followup_messages_answered']} (completed replies, first message excluded)")
 print(f"workflow status:                  {report['workflow_status']}")

@@ -105,6 +105,7 @@ class ConversationWithContextWorkflow:
             customer_message = self._inbox.popleft()
             reply = await workflow.execute_activity(
                 generate_reply_from_context,
+                # Snapshot at scheduling: includes customer messages queued behind this one.
                 ContextReplyRequest(
                     self._conversation_id,
                     customer_message.sequence,

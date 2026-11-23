@@ -7,6 +7,10 @@
 #   TEMPORAL_GRPC_PORT  server gRPC port (default 7233)
 #   TEMPORAL_UI_PORT    server Web UI port (default 8233)
 #   KEEP=1              leave the server and the worker running on exit
+#   PRIVATE_PIDS=1      keep PID files in a directory of this shell only; a
+#                       later script then cannot adopt the processes (t2 does)
+# On exit, stop_all stops only the server and the worker this shell started,
+# including the `uv run` launcher of the worker and its child processes.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -21,9 +25,21 @@ export DEMO_OUTBOX_DIR="${DEMO_OUTBOX_DIR:-$RUN_DIR/outbox}"
 export PYTHONDONTWRITEBYTECODE=1
 
 mkdir -p "$RUN_DIR"
-SERVER_PID_FILE="$RUN_DIR/server.pid"
-WORKER_PID_FILE="$RUN_DIR/worker.pid"
+if [ "${PRIVATE_PIDS:-0}" = "1" ]; then
+  PID_DIR="$RUN_DIR/pids-$$"
+  mkdir -p "$PID_DIR"
+else
+  # Shared, so t2-patch-fix.sh can stop what a KEEP=1 t2-change-code.sh left running.
+  PID_DIR="$RUN_DIR"
+fi
+SERVER_PID_FILE="$PID_DIR/server.pid"
+WORKER_PID_FILE="$PID_DIR/worker.pid"
 STARTED_SERVER=0
+STARTED_WORKER=0
+# The server process this shell started; empty when none.
+SERVER_PID=""
+# The `uv run` process that launched this shell's worker; empty when none.
+WORKER_LAUNCHER_PID=""
 
 epoch_now() {
   python3 -c 'import time; print(f"{time.time():.3f}")'
@@ -63,7 +79,8 @@ start_temporal_server() {
     --ui-port "$TEMPORAL_UI_PORT" \
     --log-level warn \
     >"$log_file" 2>&1 &
-  echo "$!" >"$SERVER_PID_FILE"
+  SERVER_PID="$!"
+  echo "$SERVER_PID" >"$SERVER_PID_FILE"
   STARTED_SERVER=1
   for _ in $(seq 1 60); do
     if server_is_healthy; then
@@ -100,11 +117,57 @@ stop_pid_from_file() {
   kill -KILL "$pid" 2>/dev/null || true
 }
 
+descendant_pids() {
+  local child
+  for child in $(pgrep -P "$1" 2>/dev/null); do
+    echo "$child"
+    descendant_pids "$child"
+  done
+}
+
+# Usage: stop_process_tree <pid> <name>
+# Sends SIGTERM to the process and its descendants, waits up to 30 s, then SIGKILL.
+stop_process_tree() {
+  local root="$1"
+  local name="$2"
+  kill -0 "$root" 2>/dev/null || return 0
+  local pids
+  pids="$root $(descendant_pids "$root" | tr '\n' ' ')"
+  kill -TERM $pids 2>/dev/null || true
+  local alive=""
+  for _ in $(seq 1 60); do
+    alive=""
+    for pid in $pids; do
+      if kill -0 "$pid" 2>/dev/null; then
+        alive="$alive $pid"
+      fi
+    done
+    if [ -z "$alive" ]; then
+      echo "Stopped the $name (PIDs $pids)."
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "The $name (PIDs$alive) did not exit within 30 s after SIGTERM; sending SIGKILL." >&2
+  kill -KILL $alive 2>/dev/null || true
+}
+
 stop_worker() {
   stop_pid_from_file "$WORKER_PID_FILE" "$TEMPORAL_APP_DIR/worker.py" "worker"
+  if [ -n "$WORKER_LAUNCHER_PID" ]; then
+    stop_process_tree "$WORKER_LAUNCHER_PID" "worker launcher"
+    WORKER_LAUNCHER_PID=""
+  fi
+  STARTED_WORKER=0
 }
 
 stop_server() {
+  if [ -n "$SERVER_PID" ]; then
+    stop_process_tree "$SERVER_PID" "Temporal server"
+    SERVER_PID=""
+    rm -f "$SERVER_PID_FILE"
+    return
+  fi
   stop_pid_from_file "$SERVER_PID_FILE" "temporal server start-dev" "Temporal server"
 }
 
@@ -119,6 +182,8 @@ start_worker() {
   DEMO_CONVERSATION_CODE="$code_version" DEMO_WORKER_PID_FILE="$WORKER_PID_FILE" \
     uv run --locked --quiet --project "$TEMPORAL_APP_DIR" python "$TEMPORAL_APP_DIR/worker.py" \
     >"$log_file" 2>&1 &
+  WORKER_LAUNCHER_PID="$!"
+  STARTED_WORKER=1
   for _ in $(seq 1 120); do
     if grep -q "worker polling" "$log_file" 2>/dev/null && [ -s "$WORKER_PID_FILE" ]; then
       echo "Worker $code_version is polling (PID $(cat "$WORKER_PID_FILE"))."
@@ -133,11 +198,17 @@ start_worker() {
 stop_all() {
   if [ "${KEEP:-0}" = "1" ]; then
     echo "KEEP=1: leaving the server (UI http://localhost:$TEMPORAL_UI_PORT) and the worker running."
-    echo "Their PIDs are in $SERVER_PID_FILE and $WORKER_PID_FILE."
+    echo "Their PIDs are in $SERVER_PID_FILE and $WORKER_PID_FILE${WORKER_LAUNCHER_PID:+ (worker launcher PID $WORKER_LAUNCHER_PID)}."
     return
   fi
-  stop_worker
+  if [ "$STARTED_WORKER" = "1" ]; then
+    stop_worker
+  fi
   if [ "$STARTED_SERVER" = "1" ]; then
     stop_server
+  fi
+  if [ "$PID_DIR" != "$RUN_DIR" ]; then
+    # Only files of processes this shell started, all stopped above.
+    rmdir "$PID_DIR" 2>/dev/null || true
   fi
 }

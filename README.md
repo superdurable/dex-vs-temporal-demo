@@ -81,7 +81,7 @@ Dex:
 
 ### 3. A conversation that keeps going
 
-Load: follow-up messages at 8 per second, one AI reply per message, about 200 bytes per message and per reply.
+Load: follow-up messages at 8 per second, one AI reply per message, about 200 bytes per message and per reply. `t8-context-in-activity.sh` also runs with 8 KiB messages at 2 per second.
 
 | Script | What it shows |
 | --- | --- |
@@ -107,13 +107,15 @@ Temporal, Continue-As-New with the transcript carried inline (`t6-continue-as-ne
 
 Temporal, the conversation context passed to the reply activity (`t8-context-in-activity.sh`):
 
-- In the workflows above, `generate_reply` receives only the current customer message, because the reply is a mock. A real model call needs the conversation. `ConversationWithContextWorkflow` is `ConversationWorkflow` with one change: each reply activity, `generate_reply_from_context`, receives every transcript record appended so far (customer messages and AI replies). It returns the same mock reply. No Continue-As-New, no External Storage.
+- In the workflows above, `generate_reply` receives only the current customer message, because the reply is a mock. A real model call needs the conversation. `ConversationWithContextWorkflow` is `ConversationWorkflow` with one change: each reply activity, `generate_reply_from_context`, receives the transcript as a regular activity input, with the default JSON encoding. It returns the same mock reply. No Continue-As-New, no External Storage.
+- The input holds every transcript record appended when the activity is scheduled: customer messages and AI replies. Under a backlog, that includes customer messages queued behind the one being answered. The text of the message being answered appears once. The workflow adds no history events compared with `t5-flood.sh`.
 - Temporal records an activity's input in its `ActivityTaskScheduled` event. Each reply copies the transcript into history again, so history grows with the square of the message count.
-- 200-byte messages at 8 per second, three runs: 408 follow-up messages accepted, 407 answered in 51 s. The server terminated the workflow at 4,907 events and 52,602,112 to 52,602,325 history bytes: `Workflow history size exceeds limit.` The 409th message is rejected: `workflow execution already completed`. The last reply input was 253,509 bytes, with 817 transcript records.
-- 8 KiB messages at 2 per second, two runs: 109 follow-up messages accepted, 108 answered in 54 s. The same termination at 1,319 events and 52,719,078 to 52,719,369 bytes. The last reply input was 938,958 bytes. A run at 8 per second stopped at the same message, at 52,719,405 bytes.
-- The 50 MB history size limit is reached first in both. The 2 MB payload limit is not reached.
-- History passes 10 MB after 181 messages (200 bytes) and after 48 messages (8 KiB); the server logs `history size exceeds warn limit.` With 8 KiB messages, the worker logs the payload warning from message 61 on: `[TMPRL1103] Attempted to upload payloads with size that exceeded the warning limit. size=525534 limit=524288`. With 200-byte messages, no input reaches 512 KB.
+- 200-byte messages at 8 per second, five runs: 408 follow-up messages accepted, 407 answered in 51 s. The server terminated the workflow at 4,907 events and 52,602,112 to 52,602,325 history bytes: `Workflow history size exceeds limit.` The 409th message is rejected: `workflow execution already completed`. The input of the last scheduled reply activity, which did not complete, was 253,509 bytes, with 817 transcript records.
+- 8 KiB messages at 2 per second, three runs: 109 follow-up messages accepted, 108 answered in 54 s. The same termination at 1,319 events and 52,719,073 to 52,719,369 bytes. The input of the last scheduled reply activity, which did not complete, was 938,958 bytes. A run at 8 per second stopped at the same message, at 52,719,405 bytes.
+- The 50 MiB history size limit is reached first in both. The 2 MiB payload limit is not reached.
+- History passes 10 MiB after 181 follow-up messages (200 bytes) and after 48 (8 KiB). These counts come from the cumulative serialized size of the history events; the server logs `history size exceeds warn limit.` when it passes 10 MiB. With 8 KiB messages, the worker logs the payload warning from follow-up message 61 on: `[TMPRL1103] Attempted to upload payloads with size that exceeded the warning limit. size=525534 limit=524288`. With 200-byte messages, no input reaches 512 KiB.
 - No workflow task failed, and the worker logged no error before the termination.
+- These numbers hold for a regular activity that receives the full transcript on each call. Other designs were not measured. A local activity records only its result, in a marker event, so the repeated input is gone; its execution semantics differ from a regular activity. Passing only the new messages needs the conversation kept in storage outside the workflow. Temporal's guidance for large inputs is the claim-check pattern, which External Storage implements.
 
 Dex (`d5-flood-fair.sh`):
 
