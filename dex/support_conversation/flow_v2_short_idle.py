@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from dex import (
     Attribute,
     AttributeMap,
-    AttributeMapLoad,
     Channel,
     Context,
     Flow,
@@ -28,35 +27,33 @@ from dex import (
     rpc,
 )
 
-from support_conversation.mailer import ConversationMailer
+from support_conversation.mailer import ConversationMailer, conversation_notice_key
 from support_conversation.reply_generator import ReplyGenerator
 from support_conversation.sentiment import SentimentAnalyzer
 from support_conversation.transcript import (
     CURRENT_CHUNK_TOKEN,
-    ROLE_ASSISTANT,
-    ROLE_CUSTOMER,
     STATUS_NUDGED,
     STATUS_WAITING,
-    TRANSCRIPT_CHUNK_SIZE,
     ConversationSettings,
     ConversationState,
     PendingExchange,
     ReplyRequest,
     TranscriptChunk,
     TranscriptPage,
-    TranscriptRecord,
     TranscriptSummarizer,
     TranscriptSummary,
-    apply_transcript_append,
-    archived_chunk_token,
-    bounded_reply_text,
-    bounded_tool_calls,
-    chunk_tokens_to_drop,
-    customer_message_error,
+    beyond_retention_page,
     drop_oldest_archived_chunks,
+    exchange_records,
     parse_transcript_page_token,
     plan_transcript_append,
+    record_exchange,
     reply_request_error,
+    require_archived_transcript_page,
+    transcript_page,
+    unfittable_exchange_error,
+    validate_customer_message,
+    validated_agent_name,
 )
 
 # --- Schema: Channel, Attributes, AttributeMap ---
@@ -67,31 +64,18 @@ ASSIGNED_AGENT = Attribute("AssignedAgent", str)
 SUMMARY = Attribute("Summary", TranscriptSummary)
 TRANSCRIPT_CHUNKS = AttributeMap("TranscriptChunks", TranscriptChunk)
 
-MAX_AGENT_NAME_CHARACTERS = 200
 # Replaces the idle window from the start input for WaitForCustomerStep.
 IDLE_WINDOW = timedelta(seconds=10)
 
-# --- Transcript chunk helpers ---
 # GenerateReplyStep and TrimTranscriptStep write the transcript. Steps of one
 # conversation run one at a time, so no transcript chunk needs a lock.
 
 
 def transcript_step_options(dropped_tokens: list[str]) -> StepOptions:
     """Options of a transcript writer: load "current" and the chunks it will drop."""
-    loads: list[AttributeMapLoad] = [TRANSCRIPT_CHUNKS.load(CURRENT_CHUNK_TOKEN)]
-    loads.extend(TRANSCRIPT_CHUNKS.load(token) for token in dropped_tokens)
-    return StepOptions(execute_load_attribute_map_instances=tuple(loads))
-
-
-def utc_timestamp() -> str:
-    return (
-        datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    )
-
-
-def notice_key(context: Context, kind: str) -> str:
-    """Stable across retries of one Step execution; distinct per execution and run."""
-    return f"{context.run_id}/{kind}/{context.step_execution_id}"
+    tokens = [CURRENT_CHUNK_TOKEN, *dropped_tokens]
+    loads = tuple(TRANSCRIPT_CHUNKS.load(token) for token in tokens)
+    return StepOptions(execute_load_attribute_map_instances=loads)
 
 
 # --- Steps ---
@@ -126,46 +110,25 @@ class GenerateReplyStep(Step[ReplyRequest]):
         input_error = reply_request_error(input)
         if input_error:
             return force_fail(f"invalid reply request: {input_error}")
-        reply = self.reply_generator.generate_reply(
-            context.flow_id, input.customer_messages
-        )
+        messages = input.customer_messages
+        reply = self.reply_generator.generate_reply(context.flow_id, messages)
         tool_calls = list(reply.tool_calls)
         # Empty when a v1 movement queued this Step before the deploy: no analysis ran.
         if input.sentiment:
             tool_calls.append(f"analyze_sentiment:{input.sentiment}")
-        recorded_at = utc_timestamp()
-        records = [
-            TranscriptRecord(
-                0, ROLE_CUSTOMER, input.customer_messages[0], recorded_at=recorded_at
-            ),
-            TranscriptRecord(
-                0,
-                ROLE_ASSISTANT,
-                bounded_reply_text(reply.text),
-                bounded_tool_calls(tool_calls),
-                recorded_at,
-            ),
-        ]
+        records = exchange_records(messages[0], reply.text, tool_calls)
         state = CONVERSATION_STATE.get(context) or ConversationState()
-        current_chunk = (
-            TRANSCRIPT_CHUNKS.get(context, CURRENT_CHUNK_TOKEN) or TranscriptChunk()
-        )
+        current_chunk = TRANSCRIPT_CHUNKS.get(context, CURRENT_CHUNK_TOKEN)
         plan = plan_transcript_append(state, current_chunk, records)
         if plan.over_budget_bytes > 0:
             # Make room first; the input keeps the reply, so the model is not called again.
+            exchange = PendingExchange(input.settings, records)
+            options = transcript_step_options(plan.chunk_tokens_to_drop)
             return go_to_many(
-                StepMovement.of(
-                    TrimTranscriptStep,
-                    PendingExchange(input.settings, records),
-                    options=transcript_step_options(
-                        chunk_tokens_to_drop(state, plan.over_budget_bytes)
-                    ),
-                )
+                StepMovement.of(TrimTranscriptStep, exchange, options=options)
             )
-        apply_transcript_append(state, plan, records)
-        if plan.archived_chunk is not None:
-            TRANSCRIPT_CHUNKS.set(context, plan.archived_chunk_token, plan.archived_chunk)
-        TRANSCRIPT_CHUNKS.set(context, CURRENT_CHUNK_TOKEN, plan.current_chunk)
+        for token, chunk in record_exchange(state, plan, records):
+            TRANSCRIPT_CHUNKS.set(context, token, chunk)
         state.status = STATUS_WAITING
         CONVERSATION_STATE.set(context, state)
         return go_to(WaitForCustomerStep, input.settings)
@@ -182,43 +145,30 @@ class TrimTranscriptStep(Step[PendingExchange]):
 
     def execute(self, context: Context, input: PendingExchange) -> StepDecision:
         state = CONVERSATION_STATE.get(context) or ConversationState()
-        current_chunk = (
-            TRANSCRIPT_CHUNKS.get(context, CURRENT_CHUNK_TOKEN) or TranscriptChunk()
-        )
+        current_chunk = TRANSCRIPT_CHUNKS.get(context, CURRENT_CHUNK_TOKEN)
         plan = plan_transcript_append(state, current_chunk, input.records)
         # Loaded through the movement options built by transcript_step_options.
-        dropped_tokens = chunk_tokens_to_drop(state, plan.over_budget_bytes)
+        dropped_tokens = plan.chunk_tokens_to_drop
         if plan.over_budget_bytes > 0 and not dropped_tokens:
             # Unreachable for validated messages; transcript.py asserts the bounds.
-            return force_fail(
-                f"one exchange cannot fit the transcript budget: "
-                f"{plan.over_budget_bytes} bytes over with no chunk left to drop"
-            )
+            return force_fail(unfittable_exchange_error(plan))
         if dropped_tokens:
             summary = SUMMARY.get(context)
             for token in dropped_tokens:
-                summary = self.summarizer.fold_chunk_into_summary(
-                    summary, TRANSCRIPT_CHUNKS.get(context, token)
-                )
+                chunk = TRANSCRIPT_CHUNKS.get(context, token)
+                summary = self.summarizer.fold_chunk_into_summary(summary, chunk)
                 TRANSCRIPT_CHUNKS.delete(context, token)
             SUMMARY.set(context, summary)
             drop_oldest_archived_chunks(state, dropped_tokens)
             plan = plan_transcript_append(state, current_chunk, input.records)
         if plan.over_budget_bytes > 0:
             CONVERSATION_STATE.set(context, state)
+            options = transcript_step_options(plan.chunk_tokens_to_drop)
             return go_to_many(
-                StepMovement.of(
-                    TrimTranscriptStep,
-                    input,
-                    options=transcript_step_options(
-                        chunk_tokens_to_drop(state, plan.over_budget_bytes)
-                    ),
-                )
+                StepMovement.of(TrimTranscriptStep, input, options=options)
             )
-        apply_transcript_append(state, plan, input.records)
-        if plan.archived_chunk is not None:
-            TRANSCRIPT_CHUNKS.set(context, plan.archived_chunk_token, plan.archived_chunk)
-        TRANSCRIPT_CHUNKS.set(context, CURRENT_CHUNK_TOKEN, plan.current_chunk)
+        for token, chunk in record_exchange(state, plan, input.records):
+            TRANSCRIPT_CHUNKS.set(context, token, chunk)
         state.status = STATUS_WAITING
         CONVERSATION_STATE.set(context, state)
         return go_to(WaitForCustomerStep, input.settings)
@@ -238,10 +188,8 @@ class WaitForCustomerStep(Step[ConversationSettings]):
     def execute(self, context: Context, input: ConversationSettings) -> StepDecision:
         if context.has_timer_fired():
             return go_to(NudgeCustomerStep, input)
-        return go_to(
-            AnalyzeSentimentStep,
-            ReplyRequest(input, list(CUSTOMER_MESSAGES.results(context))),
-        )
+        messages = list(CUSTOMER_MESSAGES.results(context))
+        return go_to(AnalyzeSentimentStep, ReplyRequest(input, messages))
 
 
 # dex:group group-id:idle-handling group-label:"Idle handling"
@@ -252,8 +200,9 @@ class NudgeCustomerStep(Step[ConversationSettings]):
 
     def execute(self, context: Context, input: ConversationSettings) -> StepDecision:
         state = CONVERSATION_STATE.get(context)
+        notice_key = conversation_notice_key(context, "nudge")
         self.mailer.send_conversation_notice(
-            notice_key(context, "nudge"), context.flow_id, "nudge", state.record_count
+            notice_key, context.flow_id, "nudge", state.record_count
         )
         state.status = STATUS_NUDGED
         CONVERSATION_STATE.set(context, state)
@@ -272,10 +221,8 @@ class WaitAfterNudgeStep(Step[ConversationSettings]):
     def execute(self, context: Context, input: ConversationSettings) -> StepDecision:
         if context.has_timer_fired():
             return go_to(CloseConversationStep, input)
-        return go_to(
-            AnalyzeSentimentStep,
-            ReplyRequest(input, list(CUSTOMER_MESSAGES.results(context))),
-        )
+        messages = list(CUSTOMER_MESSAGES.results(context))
+        return go_to(AnalyzeSentimentStep, ReplyRequest(input, messages))
 
 
 # dex:group group-id:idle-handling group-label:"Idle handling"
@@ -289,11 +236,9 @@ class CloseConversationStep(Step[ConversationSettings]):
             return go_to(WaitForCustomerStep, input)
         state = CONVERSATION_STATE.get(context)
         # Written before the close decision; it counts only if the run completes.
+        notice_key = conversation_notice_key(context, "close-summary")
         self.mailer.send_conversation_notice(
-            notice_key(context, "close-summary"),
-            context.flow_id,
-            "close-summary",
-            state.record_count,
+            notice_key, context.flow_id, "close-summary", state.record_count
         )
         # No status write here: it would also commit on the fallback path.
         # A message that arrives during this Step sends the Flow back to waiting.
@@ -347,18 +292,14 @@ class SupportConversationFlow(Flow[ReplyRequest]):
     @rpc(timeout=timedelta(seconds=10))
     def post_message(self, context: Context, text: str) -> RPCResult[bool]:
         """Validate one customer message and queue it; the waiting Step consumes it."""
-        message_error = customer_message_error(text)
-        if message_error:
-            raise ValueError(message_error)
+        validate_customer_message(text)
         CUSTOMER_MESSAGES.publish(context, text)
         return RPCResult(True)
 
     @rpc(timeout=timedelta(seconds=10))
     def assign_agent(self, context: Context, agent_name: str) -> RPCResult[str]:
         """Write AssignedAgent, which no waiting Step reads or locks."""
-        agent_name = agent_name.strip()
-        if not agent_name or len(agent_name) > MAX_AGENT_NAME_CHARACTERS:
-            raise ValueError("agent name must be 1 to 200 characters")
+        agent_name = validated_agent_name(agent_name)
         ASSIGNED_AGENT.set(context, agent_name)
         return RPCResult(agent_name)
 
@@ -375,34 +316,8 @@ class SupportConversationFlow(Flow[ReplyRequest]):
         state = CONVERSATION_STATE.get(context)
         oldest = state.oldest_archived_chunk_token
         if page_token != CURRENT_CHUNK_TOKEN:
-            if not state.newest_archived_chunk_token or int(page_token) > int(
-                state.newest_archived_chunk_token
-            ):
-                raise ValueError(f'transcript page "{page_token}" is not archived yet')
+            require_archived_transcript_page(state, page_token)
             if int(page_token) < int(oldest):
-                return RPCResult(
-                    TranscriptPage(
-                        page_token,
-                        [],
-                        is_beyond_retention=True,
-                        oldest_retained_page_token=oldest,
-                    )
-                )
+                return RPCResult(beyond_retention_page(page_token, oldest))
         chunk = TRANSCRIPT_CHUNKS.get(context, page_token)
-        if page_token == CURRENT_CHUNK_TOKEN:
-            next_older = state.newest_archived_chunk_token
-        else:
-            older_sequence = int(page_token) - TRANSCRIPT_CHUNK_SIZE
-            next_older = (
-                archived_chunk_token(older_sequence)
-                if older_sequence >= int(oldest)
-                else ""
-            )
-        return RPCResult(
-            TranscriptPage(
-                page_token,
-                list(reversed(chunk.records)),
-                next_older_page_token=next_older,
-                oldest_retained_page_token=oldest,
-            )
-        )
+        return RPCResult(transcript_page(state, page_token, chunk))

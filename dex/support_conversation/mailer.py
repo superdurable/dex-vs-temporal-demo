@@ -8,7 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
+from dex import Context
+
 OUTBOX_FILE_NAME = "outbox-dex.jsonl"
+
+
+def conversation_notice_key(context: Context, kind: str) -> str:
+    """Stable across retries of one Step execution; distinct per execution and run."""
+    return f"{context.run_id}/{kind}/{context.step_execution_id}"
 
 
 class ConversationMailer(Protocol):

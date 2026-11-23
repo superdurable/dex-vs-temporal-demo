@@ -1,8 +1,12 @@
-"""Data models of the conversation and the chunked transcript; no Dex resources here."""
+"""Data models and pure helpers of the conversation and its chunked transcript.
+
+No Dex resources here: the Flow reads and writes them, these helpers compute values.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Protocol
 
 from dex import CodecRegistry
@@ -23,6 +27,7 @@ MAX_MESSAGE_CHARACTERS = 8192
 MAX_REPLY_CHARACTERS = 2000
 MAX_TOOL_CALLS = 8
 MAX_TOOL_CALL_CHARACTERS = 64
+MAX_AGENT_NAME_CHARACTERS = 200
 
 ROLE_CUSTOMER = "customer"
 ROLE_ASSISTANT = "assistant"
@@ -197,12 +202,50 @@ def reply_request_error(request: ReplyRequest) -> str:
     return customer_message_error(request.customer_messages[0])
 
 
+def validate_customer_message(text: object) -> None:
+    """Raise ValueError when the customer message is invalid."""
+    message_error = customer_message_error(text)
+    if message_error:
+        raise ValueError(message_error)
+
+
+def validated_agent_name(agent_name: str) -> str:
+    """Return the stripped agent name; raise ValueError when it is empty or too long."""
+    agent_name = agent_name.strip()
+    if not agent_name or len(agent_name) > MAX_AGENT_NAME_CHARACTERS:
+        raise ValueError("agent name must be 1 to 200 characters")
+    return agent_name
+
+
 def bounded_reply_text(text: str) -> str:
     return text[:MAX_REPLY_CHARACTERS]
 
 
 def bounded_tool_calls(tool_calls: list[str]) -> list[str]:
     return [call[:MAX_TOOL_CALL_CHARACTERS] for call in tool_calls[:MAX_TOOL_CALLS]]
+
+
+def utc_timestamp() -> str:
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    )
+
+
+def exchange_records(
+    customer_message: str, reply_text: str, tool_calls: list[str]
+) -> list[TranscriptRecord]:
+    """The customer message and its bounded reply; the append assigns sequences."""
+    recorded_at = utc_timestamp()
+    return [
+        TranscriptRecord(0, ROLE_CUSTOMER, customer_message, recorded_at=recorded_at),
+        TranscriptRecord(
+            0,
+            ROLE_ASSISTANT,
+            bounded_reply_text(reply_text),
+            bounded_tool_calls(tool_calls),
+            recorded_at,
+        ),
+    ]
 
 
 # --- Size bounds, checked once at import ---
@@ -301,17 +344,20 @@ class TranscriptAppendPlan:
     archived_chunk_bytes: int = 0
     # Bytes to drop before the append fits TRANSCRIPT_BUDGET_BYTES; 0 when it fits.
     over_budget_bytes: int = 0
+    # chunk_tokens_to_drop for over_budget_bytes; empty when the append fits.
+    chunk_tokens_to_drop: list[str] = field(default_factory=list)
 
 
 def plan_transcript_append(
     state: ConversationState,
-    current_chunk: TranscriptChunk,
+    current_chunk: TranscriptChunk | None,
     records: list[TranscriptRecord],
 ) -> TranscriptAppendPlan:
     """Assign sequences, build the chunks after the append, and measure them.
 
     Pure: changes neither ``state`` nor ``current_chunk``. Sizes come from the
     serialized chunks the transcript writer stores, not from estimates.
+    A ``current_chunk`` of None is the empty chunk of a new conversation.
     """
     if len(records) > TRANSCRIPT_CHUNK_SIZE:
         raise ValueError(f"at most {TRANSCRIPT_CHUNK_SIZE} records per append")
@@ -319,7 +365,8 @@ def plan_transcript_append(
         replace(record, sequence=state.next_sequence + offset)
         for offset, record in enumerate(records)
     ]
-    combined = [*current_chunk.records, *numbered]
+    current_records = current_chunk.records if current_chunk is not None else []
+    combined = [*current_records, *numbered]
     archived: TranscriptChunk | None = None
     if len(combined) >= TRANSCRIPT_CHUNK_SIZE:
         archived = TranscriptChunk(combined[:TRANSCRIPT_CHUNK_SIZE])
@@ -336,6 +383,7 @@ def plan_transcript_append(
         + plan.current_chunk_bytes
     )
     plan.over_budget_bytes = max(total_bytes - TRANSCRIPT_BUDGET_BYTES, 0)
+    plan.chunk_tokens_to_drop = chunk_tokens_to_drop(state, plan.over_budget_bytes)
     largest_value = max(plan.current_chunk_bytes, plan.archived_chunk_bytes)
     if largest_value > MAX_VALUE_BYTES:
         raise ValueError(
@@ -369,6 +417,64 @@ def apply_transcript_append(
         raise ValueError(
             f"transcript of {state.transcript_bytes} bytes exceeds the budget"
         )
+
+
+def unfittable_exchange_error(plan: TranscriptAppendPlan) -> str:
+    return (
+        f"one exchange cannot fit the transcript budget: "
+        f"{plan.over_budget_bytes} bytes over with no chunk left to drop"
+    )
+
+
+def record_exchange(
+    state: ConversationState,
+    plan: TranscriptAppendPlan,
+    records: list[TranscriptRecord],
+) -> list[tuple[str, TranscriptChunk]]:
+    """Apply a fitting plan to ``state``; return the chunk writes, archived chunk first."""
+    apply_transcript_append(state, plan, records)
+    writes: list[tuple[str, TranscriptChunk]] = []
+    if plan.archived_chunk is not None:
+        writes.append((plan.archived_chunk_token, plan.archived_chunk))
+    writes.append((CURRENT_CHUNK_TOKEN, plan.current_chunk))
+    return writes
+
+
+# --- Transcript pages, newest record first ---
+
+
+def require_archived_transcript_page(state: ConversationState, page_token: str) -> None:
+    """Raise ValueError when the archived page token is newer than every archived chunk."""
+    newest = state.newest_archived_chunk_token
+    if not newest or int(page_token) > int(newest):
+        raise ValueError(f'transcript page "{page_token}" is not archived yet')
+
+
+def beyond_retention_page(page_token: str, oldest: str) -> TranscriptPage:
+    """The empty page of a token older than the retention window."""
+    return TranscriptPage(
+        page_token, [], is_beyond_retention=True, oldest_retained_page_token=oldest
+    )
+
+
+def transcript_page(
+    state: ConversationState, page_token: str, chunk: TranscriptChunk
+) -> TranscriptPage:
+    """The chunk's records newest first, with the token of the next older page."""
+    oldest = state.oldest_archived_chunk_token
+    if page_token == CURRENT_CHUNK_TOKEN:
+        next_older = state.newest_archived_chunk_token
+    else:
+        older_sequence = int(page_token) - TRANSCRIPT_CHUNK_SIZE
+        next_older = (
+            archived_chunk_token(older_sequence) if older_sequence >= int(oldest) else ""
+        )
+    return TranscriptPage(
+        page_token,
+        list(reversed(chunk.records)),
+        next_older_page_token=next_older,
+        oldest_retained_page_token=oldest,
+    )
 
 
 def parse_transcript_page_token(page_token: str) -> str:
