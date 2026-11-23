@@ -53,6 +53,7 @@ from support_conversation.app import (
     flow_version_from_environment,
     import_flow_module,
     open_process_blob_cache,
+    run_directory_from_environment,
     server_address_from_environment,
 )
 from support_conversation.transcript import (
@@ -140,9 +141,45 @@ def channel_value_bytes(text: str) -> int:
     return len(json.dumps(text).encode("utf-8"))
 
 
-def host_load_sample() -> str:
-    completed = subprocess.run(["uptime"], capture_output=True, text=True, check=False)
-    return completed.stdout.strip()
+def recorded_process_id(role: str) -> int | None:
+    """PID from the scripts' process record in the run directory, if any."""
+    record = run_directory_from_environment() / "processes" / f"{role}.record"
+    try:
+        return int(record.read_text(encoding="utf-8").splitlines()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def host_load_sample() -> dict[str, Any]:
+    """uptime, plus the CPU % of this run's Worker and Dex Server process trees."""
+    uptime = subprocess.run(["uptime"], capture_output=True, text=True, check=False)
+    table = subprocess.run(
+        ["ps", "-A", "-o", "pid=,ppid=,pcpu="], capture_output=True, text=True, check=False
+    )
+    children: dict[int, list[int]] = {}
+    cpu: dict[int, float] = {}
+    for line in table.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 3:
+            pid, parent = int(fields[0]), int(fields[1])
+            children.setdefault(parent, []).append(pid)
+            cpu[pid] = float(fields[2])
+
+    def tree_cpu(root: int | None) -> float | None:
+        if root is None or root not in cpu:
+            return None
+        total, pending = 0.0, [root]
+        while pending:
+            pid = pending.pop()
+            total += cpu.get(pid, 0.0)
+            pending.extend(children.get(pid, []))
+        return round(total, 1)
+
+    return {
+        "uptime": uptime.stdout.strip(),
+        "workerCpuPercent": tree_cpu(recorded_process_id("worker")),
+        "dexServerCpuPercent": tree_cpu(recorded_process_id("dexcli-dev")),
+    }
 
 
 def read_history_event_summary(conversation_id: str) -> dict[str, int | None]:
@@ -565,14 +602,22 @@ class LoadRun:
             await asyncio.gather(follower, reporter, return_exceptions=True)
         await asyncio.gather(*self.snapshot_tasks)
         flow_status = (await self.client.describe_flow(self.conversation_id)).status
-        verification = await verify_transcript(
-            self.client,
-            self.flow,
-            self.conversation_id,
-            self.settings.message_id_prefix,
-            self.counters.acknowledged_ids,
-            self.counters.unknown_ids,
-        )
+        if drain_seconds is None:
+            # The Worker still records messages, so page reads would mix snapshots.
+            verification = {
+                "result": "not run: the Flow is still recording; backlog "
+                f"{self.counters.acknowledged - self.committed}",
+                "errors": [],
+            }
+        else:
+            verification = await verify_transcript(
+                self.client,
+                self.flow,
+                self.conversation_id,
+                self.settings.message_id_prefix,
+                self.counters.acknowledged_ids,
+                self.counters.unknown_ids,
+            )
         errors: list[str] = []
         if self.first_error is not None and self.counters.rejected:
             errors.append(f"a message was rejected: {self.first_error}")
@@ -596,6 +641,8 @@ class LoadRun:
             "postingSeconds": posting_seconds,
             "drainSeconds": drain_seconds,
             "requested": self.settings.count,
+            # requested = sent + droppedSlots + notOffered
+            "notOffered": self.settings.count - self.counters.offered,
             "end": self.progress(),
             "retriedAttempts": self.counters.retried_attempts,
             "firstError": describe_error(self.first_error) if self.first_error else None,
@@ -704,17 +751,21 @@ async def verify_transcript(
             if match and match.group(1).startswith(message_id_prefix):
                 seen[match.group(1)] = seen.get(match.group(1), 0) + 1
         duplicates = sorted(message_id for message_id, n in seen.items() if n > 1)
-        acknowledged = acknowledged_ids or set()
+        result.update(loadMessageIdsRetained=len(seen), duplicateMessageIds=duplicates[:20])
+        if duplicates:
+            errors.append(f"{len(duplicates)} message IDs recorded more than once")
+        if acknowledged_ids is None:
+            # A standalone check knows no sent IDs; it checks uniqueness only.
+            result["idCheck"] = "unique IDs only: the sent IDs are not known here"
+            result["errors"] = errors
+            return result
+        acknowledged = acknowledged_ids
         unknown = unknown_ids or set()
         unexpected = sorted(set(seen) - acknowledged - unknown)
         result.update(
-            loadMessageIdsRetained=len(seen),
-            duplicateMessageIds=duplicates[:20],
             unexpectedMessageIds=unexpected[:20],
             unknownOutcomeIdsCommitted=len(set(seen) & unknown),
         )
-        if duplicates:
-            errors.append(f"{len(duplicates)} message IDs recorded more than once")
         if unexpected:
             errors.append(f"{len(unexpected)} recorded message IDs were never sent")
         if summarized_records == 0:

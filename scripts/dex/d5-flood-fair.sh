@@ -46,6 +46,8 @@ main() {
     -server "$DEX_SERVER_ADDRESS" -timeout 120s >"$HISTORY_FILE"
   python3 "$SCRIPTS_DIR/history_steps.py" count <"$HISTORY_FILE"
   python3 "$SCRIPTS_DIR/history_steps.py" timing --last 600 <"$HISTORY_FILE"
+  log "Step timing over the whole retained window (older events are not in history)"
+  python3 "$SCRIPTS_DIR/history_steps.py" timing --last 1000000 <"$HISTORY_FILE"
 
   echo "Dex Web: http://127.0.0.1:$WEB_PORT  (Flow ID $CONVERSATION_ID)"
   return "$paced_status"
