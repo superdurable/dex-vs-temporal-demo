@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# T5: one long-lived conversation (correct variant, no Continue-As-New) takes
-# messages until a default per-execution server limit stops it.
-# Usage: scripts/temporal/t5-flood.sh   (COUNT, RATE, KEEP=1 are optional)
+# T5: one long-lived AI conversation (correct variant, no Continue-As-New)
+# takes customer messages, each answered by one generate_reply activity,
+# until a default per-execution server limit stops it.
+# Usage: scripts/temporal/t5-flood.sh
+#   COUNT  customer messages to send (default 60000)
+#   RATE   customer messages per second, 0 = as fast as possible (default 0)
+#   LOG_FILE  where to save the output; KEEP=1 leaves the server running
 # Raw output: /tmp/dex-video/temporal-run/t5-flood.log
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -19,7 +23,8 @@ conversation_id="t5-flood-$(date +%Y%m%d-%H%M%S)"
 {
   echo "=== T5 flood: $conversation_id (correct variant, idle ${IDLE_SECONDS}s, count $COUNT, rate ${RATE} msg/s, 0 = unthrottled)"
   echo "server: temporal server start-dev with no dynamic config overrides for per-execution limits"
-  drive start "$conversation_id" --variant correct --idle-seconds "$IDLE_SECONDS"
+  drive start "$conversation_id" --variant correct \
+    --idle-seconds "$IDLE_SECONDS" --close-after-seconds "$IDLE_SECONDS"
   drive assign "$conversation_id" "Avery"
   wall_start="$(epoch_now)"
   drive flood "$conversation_id" --count "$COUNT" --rate "$RATE"

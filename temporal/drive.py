@@ -1,7 +1,7 @@
 """Command-line driver for the Temporal conversation demo.
 
 Usage (from this directory):
-  uv run drive.py start <conversation-id> [--variant naive|correct] [--idle-seconds N]
+  uv run drive.py start <conversation-id> [--variant naive|correct] [--idle-seconds N] [--close-after-seconds N]
   uv run drive.py post <conversation-id> <text>
   uv run drive.py assign <conversation-id> <agent-name>
   uv run drive.py page <conversation-id> [token]
@@ -32,6 +32,7 @@ from temporalio.service import RPCError
 
 from conversation_shared import (
     CORRECT_WORKFLOW_TYPE,
+    DEFAULT_CLOSE_AFTER_SECONDS,
     DEFAULT_IDLE_SECONDS,
     NAIVE_WORKFLOW_TYPE,
     TASK_QUEUE,
@@ -44,6 +45,7 @@ WORKFLOW_TYPE_BY_VARIANT = {
 }
 FLOOD_MESSAGE_BYTES = 200
 FLOOD_PROGRESS_INTERVAL = 1000
+FLOOD_BACKLOG_TIMEOUT_SECONDS = 900
 
 
 async def connect_client() -> Client:
@@ -58,7 +60,9 @@ async def start_conversation(client: Client, args: argparse.Namespace) -> None:
     workflow_type = WORKFLOW_TYPE_BY_VARIANT[args.variant]
     handle = await client.start_workflow(
         workflow_type,
-        ConversationInput(args.conversation_id, args.idle_seconds),
+        ConversationInput(
+            args.conversation_id, args.idle_seconds, args.close_after_seconds
+        ),
         id=args.conversation_id,
         task_queue=TASK_QUEUE,
     )
@@ -68,6 +72,7 @@ async def start_conversation(client: Client, args: argparse.Namespace) -> None:
             "workflow_type": workflow_type,
             "run_id": handle.result_run_id,
             "idle_seconds": args.idle_seconds,
+            "close_after_seconds": args.close_after_seconds,
         }
     )
 
@@ -135,9 +140,15 @@ async def read_conversation_status(
     }
     try:
         summary = await handle.query("get_summary")
+        for key in (
+            "agent",
+            "message_count",
+            "customer_message_count",
+            "assistant_message_count",
+            "pending_reply_count",
+        ):
+            status[key] = summary[key]
         status["conversation_status"] = summary["status"]
-        status["agent"] = summary["agent"]
-        status["message_count"] = summary["message_count"]
     except Exception as error:
         status["message_count"] = None
         status["query_error"] = f"{type(error).__name__}: {error}"
@@ -163,6 +174,30 @@ def describe_error(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"
 
 
+async def wait_for_reply_backlog(handle: WorkflowHandle, started_at: float) -> None:
+    """Waits until every accepted message has a reply or the workflow stops."""
+    deadline = time.monotonic() + FLOOD_BACKLOG_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        description = await handle.describe()
+        if description.status is None or description.status.name != "RUNNING":
+            print(
+                f"workflow stopped while replying: status={description.status.name if description.status else None} "
+                f"elapsed={time.monotonic() - started_at:.1f}s history_events={description.history_length}",
+                flush=True,
+            )
+            return
+        summary = await handle.query("get_summary")
+        if summary["pending_reply_count"] == 0:
+            print(
+                f"reply backlog drained: replies={summary['assistant_message_count']} "
+                f"elapsed={time.monotonic() - started_at:.1f}s history_events={description.history_length}",
+                flush=True,
+            )
+            return
+        await asyncio.sleep(1)
+    print("reply backlog not drained within the timeout", flush=True)
+
+
 async def flood_conversation(client: Client, args: argparse.Namespace) -> None:
     handle = client.get_workflow_handle(args.conversation_id)
     started_at = time.monotonic()
@@ -181,8 +216,13 @@ async def flood_conversation(client: Client, args: argparse.Namespace) -> None:
         accepted += 1
         if accepted % FLOOD_PROGRESS_INTERVAL == 0:
             description = await handle.describe()
+            try:
+                replies = (await handle.query("get_summary"))["assistant_message_count"]
+            except Exception:
+                replies = "unknown"
             print(
-                f"progress accepted={accepted} elapsed={time.monotonic() - started_at:.1f}s "
+                f"progress customer_messages_accepted={accepted} replies={replies} "
+                f"elapsed={time.monotonic() - started_at:.1f}s "
                 f"history_events={description.history_length} "
                 f"workflow_status={description.status.name if description.status else None}",
                 flush=True,
@@ -190,12 +230,14 @@ async def flood_conversation(client: Client, args: argparse.Namespace) -> None:
 
     elapsed = time.monotonic() - started_at
     if stop_error:
-        print(f"REJECTED message={accepted + 1} error: {stop_error}", flush=True)
+        print(f"REJECTED customer_message={accepted + 1} error: {stop_error}", flush=True)
     print(
-        f"flood finished accepted={accepted} attempted={args.count} "
+        f"flood finished customer_messages_accepted={accepted} attempted={args.count} "
         f"elapsed={elapsed:.1f}s rate={accepted / elapsed if elapsed else 0:.1f}/s",
         flush=True,
     )
+    # Accepted messages may still be waiting for replies; keep watching them.
+    await wait_for_reply_backlog(handle, started_at)
     # Let the worker finish its last workflow task before the final read.
     await asyncio.sleep(2)
     print("final status:")
@@ -210,6 +252,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     start.add_argument("conversation_id")
     start.add_argument("--variant", choices=sorted(WORKFLOW_TYPE_BY_VARIANT), default="correct")
     start.add_argument("--idle-seconds", type=int, default=DEFAULT_IDLE_SECONDS)
+    start.add_argument(
+        "--close-after-seconds", type=int, default=DEFAULT_CLOSE_AFTER_SECONDS
+    )
     start.set_defaults(handler=start_conversation)
 
     post = commands.add_parser("post", help="post one customer message")

@@ -13,7 +13,11 @@ NAIVE_WORKFLOW_TYPE = "NaiveConversationWorkflow"
 CORRECT_WORKFLOW_TYPE = "ConversationWorkflow"
 
 DEFAULT_IDLE_SECONDS = 600
+DEFAULT_CLOSE_AFTER_SECONDS = 3600
 TRANSCRIPT_PAGE_SIZE = 100
+
+ROLE_CUSTOMER = "customer"
+ROLE_ASSISTANT = "assistant"
 CURRENT_PAGE_TOKEN = "current"
 PAGE_TOKEN_WIDTH = 20
 
@@ -26,13 +30,16 @@ STATUS_CLOSED = "closed"
 class ConversationInput:
     conversation_id: str
     idle_seconds: int = DEFAULT_IDLE_SECONDS
+    close_after_seconds: int = DEFAULT_CLOSE_AFTER_SECONDS
 
 
 @dataclass
 class TranscriptMessage:
     sequence: int
+    role: str
     text: str
     time: str
+    tool_calls: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -48,12 +55,49 @@ class ConversationSummary:
     status: str
     agent: str
     message_count: int
+    customer_message_count: int
+    assistant_message_count: int
+    pending_reply_count: int
 
 
 @dataclass
 class OutboxRequest:
     conversation_id: str
     message_count: int
+
+
+@dataclass
+class ReplyRequest:
+    conversation_id: str
+    customer_sequence: int
+    customer_text: str
+
+
+@dataclass
+class GeneratedReply:
+    text: str
+    tool_calls: list[str] = field(default_factory=list)
+
+
+def summarize_conversation(
+    conversation_id: str,
+    status: str,
+    agent: str,
+    transcript: list[TranscriptMessage],
+    pending_reply_count: int,
+) -> ConversationSummary:
+    customer_message_count = sum(
+        1 for message in transcript if message.role == ROLE_CUSTOMER
+    )
+    return ConversationSummary(
+        conversation_id,
+        status,
+        agent,
+        len(transcript),
+        customer_message_count,
+        len(transcript) - customer_message_count,
+        pending_reply_count,
+    )
 
 
 def archived_page_token(first_sequence: int) -> str:

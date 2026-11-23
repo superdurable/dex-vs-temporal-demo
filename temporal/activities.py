@@ -1,7 +1,8 @@
-"""Activities that stand in for an email provider and a summary channel.
+"""Activities that stand in for an LLM, an email provider, and a summary channel.
 
-Each one appends a single JSON line to the shared demo outbox file instead
-of calling a real provider.
+generate_reply is a deterministic local mock. The outbox activities append a
+single JSON line to the shared demo outbox file instead of calling a real
+provider.
 """
 
 from __future__ import annotations
@@ -13,7 +14,14 @@ from pathlib import Path
 
 from temporalio import activity
 
-from conversation_shared import OutboxRequest
+from conversation_shared import GeneratedReply, OutboxRequest, ReplyRequest
+
+REPLY_BYTES = 200
+TOOL_CALLS_BY_KEYWORD = (
+    ("order", "lookup_order"),
+    ("refund", "check_refund_policy"),
+    ("deliver", "track_shipment"),
+)
 
 OUTBOX_DIRECTORY = Path(
     os.environ.get("DEMO_OUTBOX_DIR", "/tmp/dex-vs-temporal-demo/outbox")
@@ -32,6 +40,22 @@ def append_outbox_record(kind: str, request: OutboxRequest) -> None:
     with OUTBOX_FILE.open("a", encoding="utf-8") as outbox:
         outbox.write(json.dumps(record) + "\n")
     activity.logger.info("outbox %s for %s", kind, request.conversation_id)
+
+
+@activity.defn
+async def generate_reply(request: ReplyRequest) -> GeneratedReply:
+    """Mock of an LLM call that uses internal tools: deterministic, local, fast."""
+    lowered_text = request.customer_text.lower()
+    tool_calls = [
+        tool for keyword, tool in TOOL_CALLS_BY_KEYWORD if keyword in lowered_text
+    ] or ["lookup_customer"]
+    reply = (
+        f"Reply to message {request.customer_sequence}: I checked "
+        f"{', '.join(tool_calls)} for you. Your request is on file and a "
+        "support specialist will follow up shortly. Is there anything else "
+        "I can help you with today? "
+    )
+    return GeneratedReply((reply * 2)[:REPLY_BYTES], tool_calls)
 
 
 @activity.defn
