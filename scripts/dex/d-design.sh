@@ -53,7 +53,7 @@ PY
   upload_lines="$(grep "_flow_definition_upload" "$(worker_log_path)" || true)"
   echo "$upload_lines"
   if grep -q "WARNING" <<<"$upload_lines" ||
-    ! grep -q -E "Flow definition (created|replaced|unchanged): flow_type=SupportConversationFlow" <<<"$upload_lines"; then
+    ! grep -q -i -E "Flow definition (is )?(created|replaced|unchanged): flow_type=SupportConversationFlow" <<<"$upload_lines"; then
     log "ERROR: the server did not store this Worker's Flow definition"
     return 1
   fi
