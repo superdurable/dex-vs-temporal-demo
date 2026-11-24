@@ -37,7 +37,7 @@ The demos use 30 seconds in place of 10 minutes.
 | `dex/` | Python Flow, Worker, and the `drive.py` command line |
 | `scripts/temporal/`, `scripts/dex/` | One script per demo |
 | `bench/` | The Worker memory benchmark: load driver, sampler, adapters, Worker images, and published results |
-| `order-delay/` | A separate small example: two steps with a change window between them, and a "Send now" change. See [order-delay/README.md](order-delay/README.md) |
+| `agent-reply/` | A separate small example: an AI agent reply that waits for human approval, then gains an auto-send timer. See [agent-reply/README.md](agent-reply/README.md) |
 
 Both `drive.py` tools take the same commands: `start`, `post`, `assign`, `page`, `status`, `flood`.
 

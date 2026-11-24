@@ -1,8 +1,9 @@
-"""Run the Temporal worker for OrderWorkflow until SIGINT or SIGTERM.
+"""Run the Temporal worker for ReplyWorkflow until SIGINT or SIGTERM.
 
-ORDER_CODE selects the workflow code: v1 (flow_v1.py, default) or v2
-(flow_v2.py). The worker identity names the code, so the workflow history
-shows which code completed each workflow task.
+AGENT_REPLY_CODE selects the workflow code module: v1 (flow_v1.py, default),
+v2 (flow_v2.py), or v2_no_patch (flow_v2_no_patch.py). The worker identity
+names the code, so the workflow history shows which code completed each
+workflow task.
 """
 
 import asyncio
@@ -17,17 +18,17 @@ from settings import TASK_QUEUE
 
 
 async def run_worker() -> None:
-    code = os.environ.get("ORDER_CODE", "v1")
+    code = os.environ.get("AGENT_REPLY_CODE", "v1")
     flow = importlib.import_module(f"flow_{code}")
-    identity = f"order-worker-{code}"
+    identity = f"reply-worker-{code}"
     address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
     client = await Client.connect(address, identity=identity)
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
         identity=identity,
-        workflows=[flow.OrderWorkflow],
-        activities=[flow.confirm_order, flow.send_to_kitchen],
+        workflows=[flow.ReplyWorkflow],
+        activities=[flow.draft_reply, flow.send_reply],
     )
     stop_requested = asyncio.Event()
     loop = asyncio.get_running_loop()

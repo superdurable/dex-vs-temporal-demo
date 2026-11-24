@@ -1,6 +1,6 @@
-"""Run the Dex Worker for OrderFlow until SIGINT or SIGTERM.
+"""Run the Dex Worker for ReplyFlow until SIGINT or SIGTERM.
 
-The Worker ID names the Flow code (order-worker-v1 or order-worker-v2), so
+The Worker ID names the Flow code (reply-worker-v1 or reply-worker-v2), so
 the Flow history shows which code ran each Step.
 """
 
@@ -9,12 +9,12 @@ import signal
 
 from dex import AsyncWorker, PullWorkerOptions, WorkerOptions
 
-from app import ORDER_CODE, REGISTRY, SERVER_ADDRESS, open_process_blob_cache
+from app import CODE, REGISTRY, SERVER_ADDRESS, open_process_blob_cache
 
 
 async def run_worker() -> None:
     cache = open_process_blob_cache("worker")
-    worker_id = f"order-worker-{ORDER_CODE}"
+    worker_id = f"reply-worker-{CODE}"
     worker = AsyncWorker(
         REGISTRY,
         cache,
@@ -30,7 +30,7 @@ async def run_worker() -> None:
     worker_task = asyncio.create_task(worker.start())
     try:
         await worker.wait_pull_registered(timeout=30)
-        print(f"worker ready with code {ORDER_CODE} as {worker_id}", flush=True)
+        print(f"worker ready with code {CODE} as {worker_id}", flush=True)
         await stop_requested.wait()
     finally:
         await worker.close()

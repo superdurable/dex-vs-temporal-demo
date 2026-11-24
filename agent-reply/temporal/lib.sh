@@ -1,22 +1,23 @@
-# Helpers for the Temporal order-delay scripts. Source it; do not run it.
+# Helpers for the Temporal agent-reply scripts. Source it; do not run it.
 # Starts `temporal server start-dev` and workers, and stops what this shell
 # started on exit.
 #
 # Environment:
-#   RUN_DIR              logs, venv, server state (default /tmp/dex-video/two-step/temporal-run)
-#   TEMPORAL_GRPC_PORT   server gRPC port (default 17233)
-#   TEMPORAL_UI_PORT     server Web UI port (default 18233)
-#   ORDER_DELAY_SECONDS  change window (scripts default to a few seconds)
+#   RUN_DIR                         logs, venv, histories (default /tmp/dex-video/two-step/temporal-reply-run)
+#   TEMPORAL_GRPC_PORT              server gRPC port (default 17233)
+#   TEMPORAL_UI_PORT                server Web UI port (default 18233)
+#   AGENT_REPLY_AUTO_SEND_SECONDS   auto-send timer (scripts default to 10 seconds)
 
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_DIR="${RUN_DIR:-/tmp/dex-video/two-step/temporal-run}"
+RUN_DIR="${RUN_DIR:-/tmp/dex-video/two-step/temporal-reply-run}"
 TEMPORAL_GRPC_PORT="${TEMPORAL_GRPC_PORT:-17233}"
 TEMPORAL_UI_PORT="${TEMPORAL_UI_PORT:-18233}"
 export TEMPORAL_ADDRESS="localhost:$TEMPORAL_GRPC_PORT"
 export UV_PROJECT_ENVIRONMENT="$RUN_DIR/venv"
 export UV_CACHE_DIR="$RUN_DIR/uv-cache"
+export UV_PYTHON_INSTALL_DIR="$RUN_DIR/uv-python"
 export PYTHONDONTWRITEBYTECODE=1
 PYTHON="$RUN_DIR/venv/bin/python"
 SERVER_PID=""
@@ -47,10 +48,11 @@ start_server() {
   exit 1
 }
 
-# Usage: start_worker v1|v2
+# Usage: start_worker v1|v2|v2_no_patch
+# Each worker is a new process, so it has no cached workflow state.
 start_worker() {
   local code="$1" worker_log="$RUN_DIR/worker-$1.log"
-  (cd "$APP_DIR" && exec env ORDER_CODE="$code" "$PYTHON" worker.py) \
+  (cd "$APP_DIR" && exec env AGENT_REPLY_CODE="$code" "$PYTHON" worker.py) \
     >"$worker_log" 2>&1 &
   WORKER_PID=$!
   for _ in $(seq 1 60); do
@@ -80,23 +82,26 @@ stop_all() {
 }
 trap stop_all EXIT
 
-STARTED_AT=0
-
-# Usage: start_order <workflow-id> <order-id>
-start_order() {
-  STARTED_AT=$(date +%s)
-  client start "$1" "$2"
+# Usage: wait_until_waiting <workflow-id>
+# Returns once deploy_to_canary completed and the next workflow task completed.
+wait_until_waiting() {
+  local events
+  for _ in $(seq 1 40); do
+    events="$(temporal workflow show --address "$TEMPORAL_ADDRESS" -w "$1" -o json)"
+    if grep -q ACTIVITY_TASK_COMPLETED <<<"$events" \
+      && [[ "$(grep -c WORKFLOW_TASK_COMPLETED <<<"$events")" -ge 2 ]]; then
+      log "$1 is waiting for approve_reply"
+      return
+    fi
+    sleep 0.5
+  done
+  log "ERROR: $1 did not reach the wait"
+  exit 1
 }
 
-# Usage: timed_result <workflow-id>; prints the result and the seconds since start_order.
-timed_result() {
-  client result "$1"
-  log "$1 finished $(($(date +%s) - STARTED_AT)) s after it started"
-}
-
-# Usage: show_history <workflow-id>; prints event types and saves the JSON.
+# Usage: show_history <workflow-id>; prints the events and saves the JSON.
 show_history() {
   temporal workflow show --address "$TEMPORAL_ADDRESS" -w "$1" -o json \
     >"$RUN_DIR/history-$1.json"
-  temporal workflow show --address "$TEMPORAL_ADDRESS" -w "$1"
+  python3 "$APP_DIR/history_summary.py" "$RUN_DIR/history-$1.json"
 }
