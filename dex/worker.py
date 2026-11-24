@@ -2,7 +2,7 @@
 
 Optional memory benchmark switches (unset means unchanged behavior):
   DEMO_MAX_CONCURRENT_TASKS   task slots (default 32)
-  DEMO_WORKER_ID_PER_START    1 appends the start time to the Worker ID
+  DEMO_WORKER_ID_PER_START    1 appends a per-process UUID to the Worker ID
   DEMO_BLOB_CACHE_BYTES       on-disk BlobCache limit (default 1 GiB)
   DEMO_METRICS_BIND           host:port of the worker_metrics.py endpoint
   DEMO_REPLY_BYTES            mock reply size (default 200)
@@ -14,7 +14,7 @@ import asyncio
 import logging
 import os
 import signal
-import time
+import uuid
 from pathlib import Path
 
 from dex import AsyncWorker, PullWorkerOptions, WorkerOptions
@@ -26,7 +26,6 @@ from support_conversation.app import (
     open_process_blob_cache,
     server_address_from_environment,
 )
-from worker_metrics import CountingBlobCache, serve_metrics
 
 FLOW_DEFINITIONS_DIRECTORY = Path(__file__).resolve().parent / "flow-definitions"
 
@@ -35,7 +34,7 @@ def worker_id_from_environment(flow_version: str) -> str:
     worker_id = os.environ.get("DEMO_WORKER_ID", f"demo-worker-{flow_version}")
     # A Worker ID must change after a restart, such as a container restart after an OOM kill.
     if os.environ.get("DEMO_WORKER_ID_PER_START") == "1":
-        worker_id = f"{worker_id}-{int(time.time())}"
+        worker_id = f"{worker_id}-{uuid.uuid4().hex}"
     return worker_id
 
 
@@ -45,6 +44,9 @@ async def run_worker() -> None:
     cache, cache_directory = open_process_blob_cache("worker")
     metrics_bind = os.environ.get("DEMO_METRICS_BIND", "")
     if metrics_bind:
+        # Imported only here: a Worker without DEMO_METRICS_BIND loads no metrics code.
+        from worker_metrics import CountingBlobCache, serve_metrics
+
         cache = CountingBlobCache(cache, cache_directory)
         serve_metrics(metrics_bind, cache)
     registry = build_registry(build_support_conversation_flow(flow_version))

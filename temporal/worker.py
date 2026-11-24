@@ -124,15 +124,16 @@ async def run_worker() -> None:
         loop.add_signal_handler(stop_signal, stop_requested.set)
     async with worker:
         logging.info(
-            "worker polling task queue %s on %s with ConversationWorkflow code %s (%s.py) "
-            "options=%s metrics=%s",
+            "worker polling task queue %s on %s with ConversationWorkflow code %s (%s.py)",
             TASK_QUEUE,
             address,
             code_version,
             conversation_module.__name__,
-            worker_options,
-            metrics_bind or "off",
         )
+        if worker_options or metrics_bind:
+            logging.info(
+                "worker options %s metrics %s", worker_options, metrics_bind or "off"
+            )
         await stop_requested.wait()
     logging.info("worker stopped")
 
