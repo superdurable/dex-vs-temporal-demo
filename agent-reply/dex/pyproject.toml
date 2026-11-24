@@ -1,0 +1,11 @@
+[project]
+name = "dex-agent-reply-demo"
+version = "0.1.0"
+description = "Dex side of the agent reply example"
+requires-python = ">=3.11"
+dependencies = [
+    "dex-python-sdk==1.45.17",
+]
+
+[tool.uv]
+package = false
