@@ -20,6 +20,8 @@ from pathlib import Path
 
 MEBIBYTE = 1024 * 1024
 LIMIT_FRACTION = 0.95
+# The sampler writes one row per second; a larger gap means missed samples.
+MAX_SAMPLE_GAP_SECONDS = 2.5
 STICKY_CACHE_COUNTERS = (
     "temporal_sticky_cache_hit",
     "temporal_sticky_cache_miss",
@@ -70,10 +72,11 @@ def read_events(path: Path) -> list[dict]:
 
 
 def summarize_latencies(rows: list[dict[str, str]]) -> dict:
+    """Latency percentiles cover observed replies only; other attempts are counted apart."""
     latencies = sorted(float(row["latency_ms"]) for row in rows if row["status"] == "ok")
     return {
-        "messages": len(rows),
-        "errors": sum(1 for row in rows if row["status"] != "ok"),
+        "attempts": len(rows),
+        "attempts_with_no_observed_reply": sum(1 for row in rows if row["status"] != "ok"),
         "p50_ms": percentile(latencies, 0.50),
         "p95_ms": percentile(latencies, 0.95),
         "p99_ms": percentile(latencies, 0.99),
@@ -94,9 +97,42 @@ def accumulate_counter_across_restarts(values: list[float]) -> float | None:
     return total + previous
 
 
+def sample_coverage(stats: list[dict[str, str]]) -> dict:
+    epochs = [float(row["epoch"]) for row in stats]
+    gaps = [later - earlier for earlier, later in zip(epochs, epochs[1:])]
+    return {
+        "samples": len(stats),
+        "first_sample_epoch": epochs[0] if epochs else None,
+        "last_sample_epoch": epochs[-1] if epochs else None,
+        "largest_sample_gap_seconds": round(max(gaps), 3) if gaps else None,
+    }
+
+
+def coverage_warnings(
+    coverage: dict, events_present: bool, latency_rows: list[dict[str, str]], restarts: int, dies: int
+) -> list[str]:
+    warnings = []
+    if not events_present:
+        warnings.append("no Docker event file: OOM kills unknown")
+    if coverage["samples"] == 0:
+        warnings.append("no samples")
+        return warnings
+    last_attempt = max(
+        (float(row["reply_epoch"] or row["post_epoch"]) for row in latency_rows), default=None
+    )
+    if last_attempt is not None and coverage["last_sample_epoch"] < last_attempt:
+        warnings.append("sampling ended before the last recorded attempt: the sampler exited early")
+    if coverage["largest_sample_gap_seconds"] and coverage["largest_sample_gap_seconds"] > MAX_SAMPLE_GAP_SECONDS:
+        warnings.append(f"a gap of {coverage['largest_sample_gap_seconds']} s between samples")
+    if restarts > dies:
+        warnings.append(f"{restarts} restarts but {dies} die events: events are missing")
+    return warnings
+
+
 def summarize(args: argparse.Namespace) -> dict:
     stats = read_csv_rows(Path(args.stats))
-    events = read_events(Path(args.events)) if Path(args.events).exists() else []
+    events_present = Path(args.events).exists()
+    events = read_events(Path(args.events)) if events_present else []
     latency_rows: list[dict[str, str]] = []
     for path in args.latency:
         latency_rows.extend(read_csv_rows(Path(path)))
@@ -119,8 +155,8 @@ def summarize(args: argparse.Namespace) -> dict:
         if row["cpu_percent"] and rush_start is not None and float(row["epoch"]) >= rush_start
     ]
     restart_counts = [int(row["restart_count"]) for row in stats if row["restart_count"]]
-    # One sample per second: samples at or above 95% of the limit count as seconds at the limit.
-    seconds_at_limit = sum(
+    # Samples (1 per second) whose working set is at or above 95% of the configured cap.
+    samples_at_cap = sum(
         1 for row in stats
         if row["mem_working_set_bytes"] and row["mem_limit_bytes"]
         and int(row["mem_working_set_bytes"]) >= LIMIT_FRACTION * int(row["mem_limit_bytes"])
@@ -154,23 +190,29 @@ def summarize(args: argparse.Namespace) -> dict:
             values = [float(row[gauge]) for row in stats if row.get(gauge)]
             metrics[f"{gauge} max MiB"] = round(max(values) / MEBIBYTE, 1) if values else None
 
+    restarts = max(restart_counts) if restart_counts else 0
+    coverage = sample_coverage(stats)
     return {
         "name": args.name,
+        "warnings": coverage_warnings(coverage, events_present, latency_rows, restarts, len(die_events)),
         "peak_working_set_mib": round(max(working_set) / MEBIBYTE, 1) if working_set else None,
         "peak_raw_usage_mib": round(max(raw_usage) / MEBIBYTE, 1) if raw_usage else None,
-        "limit_mib": round(max(limits) / MEBIBYTE, 1) if limits else None,
-        "oom_kills": len(oom_epochs),
+        "cap_mib": round(max(limits) / MEBIBYTE, 1) if limits else None,
+        "oom_kills": len(oom_epochs) if events_present else None,
         "oom_seconds_after_rush_start": [since_rush(epoch) for epoch in oom_epochs],
         "exit_codes": [event["exit_code"] for event in die_events],
-        "restarts": max(restart_counts) if restart_counts else 0,
-        "samples": len(stats),
+        "restarts": restarts,
+        **coverage,
         "samples_not_running": sum(1 for row in stats if row["status"] != "running"),
-        "seconds_working_set_at_95pct_of_limit": seconds_at_limit,
-        "rush_messages_planned": args.planned_messages,
-        "rush_messages_posted": len(rush_rows),
-        "rush_messages_answered": rush_answered,
-        "rush_messages_posted_without_reply": len(rush_rows) - rush_answered,
-        "cpu_mean_percent_during_rush": round(sum(rush_cpu) / len(rush_cpu), 1) if rush_cpu else None,
+        "samples_working_set_at_or_above_95pct_of_cap": samples_at_cap,
+        "rush_follow_up_attempts_planned": args.planned_messages,
+        "rush_follow_up_attempts": len(rush_rows),
+        "rush_attempts_with_observed_reply": rush_answered,
+        "rush_attempts_with_no_observed_reply": len(rush_rows) - rush_answered,
+        # Includes the cooldown samples after the last attempt.
+        "cpu_mean_percent_from_rush_start_to_end_of_sampling": (
+            round(sum(rush_cpu) / len(rush_cpu), 1) if rush_cpu else None
+        ),
         "cpu_peak_percent": max(cpu) if cpu else None,
         "latency_by_phase": phases,
         "worker_metrics": metrics,
@@ -184,25 +226,34 @@ def format_milliseconds(value: float | None) -> str:
 def print_markdown(summary: dict) -> None:
     print(f"### {summary['name']}")
     print()
+    for warning in summary["warnings"]:
+        print(f"**WARNING: {warning}**")
+        print()
     print("| Measure | Value |")
     print("| --- | --- |")
     for key in (
-        "peak_working_set_mib", "peak_raw_usage_mib", "limit_mib", "oom_kills",
+        "peak_working_set_mib", "peak_raw_usage_mib", "cap_mib", "oom_kills",
         "oom_seconds_after_rush_start", "exit_codes", "restarts",
-        "samples", "samples_not_running", "seconds_working_set_at_95pct_of_limit",
-        "rush_messages_planned", "rush_messages_posted", "rush_messages_answered",
-        "rush_messages_posted_without_reply",
-        "cpu_mean_percent_during_rush", "cpu_peak_percent",
+        "samples", "first_sample_epoch", "last_sample_epoch", "largest_sample_gap_seconds",
+        "samples_not_running", "samples_working_set_at_or_above_95pct_of_cap",
+        "rush_follow_up_attempts_planned", "rush_follow_up_attempts",
+        "rush_attempts_with_observed_reply", "rush_attempts_with_no_observed_reply",
+        "cpu_mean_percent_from_rush_start_to_end_of_sampling", "cpu_peak_percent",
     ):
         print(f"| {key} | {summary[key]} |")
     for key, value in summary["worker_metrics"].items():
         print(f"| {key} | {value} |")
     print()
-    print("| Phase | Messages | Errors | p50 ms | p95 ms | p99 ms | max ms |")
+    print("Latency percentiles cover observed replies only.")
+    print()
+    print(
+        "| Phase | Follow-up attempts | Attempts with no observed reply | "
+        "p50 ms | p95 ms | p99 ms | max ms |"
+    )
     print("| --- | --- | --- | --- | --- | --- | --- |")
     for phase, values in summary["latency_by_phase"].items():
         print(
-            f"| {phase} | {values['messages']} | {values['errors']} | "
+            f"| {phase} | {values['attempts']} | {values['attempts_with_no_observed_reply']} | "
             f"{format_milliseconds(values['p50_ms'])} | {format_milliseconds(values['p95_ms'])} | "
             f"{format_milliseconds(values['p99_ms'])} | {format_milliseconds(values['max_ms'])} |"
         )

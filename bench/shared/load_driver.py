@@ -76,7 +76,7 @@ class LatencyRecorder:
 
     def __post_init__(self) -> None:
         self._file = self.path.open("w", newline="", encoding="utf-8")
-        self._writer = csv.writer(self._file)
+        self._writer = csv.writer(self._file, lineterminator="\n")
         self._writer.writerow(LATENCY_CSV_HEADER)
 
     def record(
@@ -150,15 +150,12 @@ async def report_progress(recorder: LatencyRecorder, started_at: float) -> None:
         print(recorder.progress_line(started_at), flush=True)
 
 
-async def run_fill(adapter: ConversationAdapter, args: argparse.Namespace) -> None:
-    first_index = args.first_index
-    conversation_ids = [
-        f"{args.prefix}-{index:05d}"
-        for index in range(first_index, first_index + args.conversations)
-    ]
+def write_fill_manifest(
+    adapter: ConversationAdapter, args: argparse.Namespace, conversation_ids: list[str]
+) -> None:
     population = conversation_ids
     manifest_path = Path(args.manifest)
-    if first_index > 0 and manifest_path.exists():
+    if args.first_index > 0 and manifest_path.exists():
         # A later part of a split fill extends the manifest of the earlier parts.
         population = sorted(
             set(json.loads(manifest_path.read_text(encoding="utf-8"))["conversation_ids"])
@@ -172,7 +169,17 @@ async def run_fill(adapter: ConversationAdapter, args: argparse.Namespace) -> No
         "message_bytes": args.message_bytes,
         "conversation_ids": population,
     }
-    Path(args.manifest).write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+
+
+async def run_fill(adapter: ConversationAdapter, args: argparse.Namespace) -> int:
+    """Fill every conversation; return 1, with no manifest, unless all got every exchange."""
+    first_index = args.first_index
+    conversation_ids = [
+        f"{args.prefix}-{index:05d}"
+        for index in range(first_index, first_index + args.conversations)
+    ]
+    completed_exchanges = {conversation_id: 0 for conversation_id in conversation_ids}
     recorder = LatencyRecorder(Path(args.latency_csv), "fill")
     queue: asyncio.Queue[str] = asyncio.Queue()
     for conversation_id in conversation_ids:
@@ -190,6 +197,7 @@ async def run_fill(adapter: ConversationAdapter, args: argparse.Namespace) -> No
                 )
                 if not replied:
                     break
+                completed_exchanges[conversation_id] = message_index
 
     progress = asyncio.create_task(report_progress(recorder, started_at))
     await asyncio.gather(*(fill_worker() for _ in range(args.concurrency)))
@@ -202,6 +210,22 @@ async def run_fill(adapter: ConversationAdapter, args: argparse.Namespace) -> No
         f"rate={recorder.replied / elapsed if elapsed else 0:.1f} exchanges/s",
         flush=True,
     )
+    incomplete = {
+        conversation_id: count
+        for conversation_id, count in completed_exchanges.items()
+        if count < args.exchanges
+    }
+    if incomplete:
+        print(
+            f"fill INCOMPLETE: {len(incomplete)} of {len(conversation_ids)} conversations "
+            f"have fewer than {args.exchanges} confirmed exchanges; no manifest written",
+            flush=True,
+        )
+        for conversation_id, count in sorted(incomplete.items()):
+            print(f"  {conversation_id}: {count} confirmed exchanges", flush=True)
+        return 1
+    write_fill_manifest(adapter, args, conversation_ids)
+    return 0
 
 
 async def observe_all(adapter: ConversationAdapter, conversation_ids: list[str], concurrency: int) -> None:
@@ -312,14 +336,15 @@ async def main() -> int:
     args = build_argument_parser().parse_args()
     adapter = load_adapter(args.adapter)
     await adapter.connect()
+    status = 0
     try:
         if args.phase == "fill":
-            await run_fill(adapter, args)
+            status = await run_fill(adapter, args)
         else:
             await run_rush(adapter, args)
     finally:
         await adapter.close()
-    return 0
+    return status
 
 
 if __name__ == "__main__":

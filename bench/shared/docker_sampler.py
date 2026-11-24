@@ -117,7 +117,7 @@ def main() -> int:
     ] + args.metric
     previous_cpu: tuple[int, int] | None = None
     with open(args.out, "w", newline="", encoding="utf-8") as output:
-        writer = csv.writer(output)
+        writer = csv.writer(output, lineterminator="\n")
         writer.writerow(header)
         next_tick = time.monotonic()
         while not stop.is_set():

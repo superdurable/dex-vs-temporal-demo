@@ -4,13 +4,13 @@
 # storage. Only the worker runs in a container with explicit --memory and
 # --cpus limits. See bench/README.md.
 #
-# Usage: scripts/temporal/t3-memory.sh [run|cleanup]
+# Usage: scripts/temporal/t3-memory.sh [run | cleanup <run ID>]
 #   run       (default) one complete run: start a fresh dev server, build the
 #             worker image, fill N conversations with a fill worker, run the
 #             rush against a clean, limited worker container, summarize, and
 #             stop everything this run started. The server data is in memory
 #             and goes away with the server.
-#   cleanup   remove leftover containers of runs of this script (label dvt-mem-run)
+#   cleanup   remove the leftover containers of one earlier run (label dvt-mem-run=<run ID>)
 #
 # Parameters (environment):
 #   RUN_DIR            output directory (default /tmp/dex-video/temporal-mem-run)
@@ -29,12 +29,16 @@ export TEMPORAL_UI_PORT="${TEMPORAL_UI_PORT:-8253}"
 # PID files of this shell only, so no other script adopts this run's server.
 export PRIVATE_PIDS=1
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+# This run's server is private: an inherited KEEP=1 does not keep it running.
+KEEP=0
+
+log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+
+RUN_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
+source "$REPO_ROOT/bench/shared/memory_run.sh"
 
 METRICS_PORT="${METRICS_PORT:-9473}"
 IMAGE="dvt-temporal-worker"
-# Every container of a run carries this label and a name with this run ID.
-RUN_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
-RUN_LABEL="dvt-mem-run"
 WORKER_CONTAINER="dvt-mem-$RUN_ID-temporal-worker"
 FILL_CONTAINER="dvt-mem-$RUN_ID-temporal-fill-worker"
 
@@ -70,36 +74,9 @@ WATCHDOG_PID=""
 STEP_PID=""
 SAMPLER_PID=""
 
-log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
-
 driver() {
   "$PYTHON" "$REPO_ROOT/bench/shared/load_driver.py" \
     --adapter temporal_adapter:TemporalConversationAdapter "$@"
-}
-
-# Usage: run_step <log-file> <command...>
-# Runs the command in the background and waits, so a stop signal is handled at once.
-run_step() {
-  local step_log="$1"
-  shift
-  "$@" >"$step_log" 2>&1 </dev/null &
-  STEP_PID="$!"
-  local status=0
-  wait "$STEP_PID" || status=$?
-  STEP_PID=""
-  tail -n 3 "$step_log"
-  return "$status"
-}
-
-require_free_port() {
-  if lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; then
-    log "ERROR: port $1 is in use; choose another with $2"
-    exit 1
-  fi
-}
-
-run_container_ids() {
-  docker ps -aq --filter "label=$RUN_LABEL=$RUN_ID"
 }
 
 # start_worker_container <name> <memory> <cpus> <cache size or empty> <metrics port or empty>
@@ -111,7 +88,7 @@ start_worker_container() {
     metrics_env=(-e DEMO_METRICS_BIND=0.0.0.0:9464)
   fi
   # --memory-swap equal to --memory disables swap, so the limit is hard.
-  docker run -d --name "$name" --hostname temporal-worker --label "$RUN_LABEL=$RUN_ID" \
+  start_run_container --name "$name" --hostname temporal-worker \
     --memory "$memory" --memory-swap "$memory" --cpus "$cpus" \
     --restart on-failure \
     -e TEMPORAL_ADDRESS="host.docker.internal:$TEMPORAL_GRPC_PORT" \
@@ -134,12 +111,6 @@ start_worker_container() {
   exit 1
 }
 
-# A graceful stop (SIGINT, the image's stop signal) releases the worker's sticky queue.
-stop_container() {
-  docker stop -t 30 "$1" >/dev/null 2>&1 || true
-  docker rm -f "$1" >/dev/null 2>&1 || true
-}
-
 stop_sampler() {
   if [ -n "$SAMPLER_PID" ]; then
     stop_process_tree "$SAMPLER_PID" "sampler"
@@ -149,7 +120,9 @@ stop_sampler() {
 
 on_exit() {
   local status="$1"
-  trap - EXIT INT TERM
+  # A repeated stop signal does not interrupt the cleanup.
+  trap '' INT TERM
+  trap - EXIT
   # Cleanup continues past a failing command.
   set +e
   if [ -n "$WATCHDOG_PID" ]; then
@@ -159,10 +132,10 @@ on_exit() {
     stop_process_tree "$STEP_PID" "running step"
   fi
   stop_sampler
-  for container in $(run_container_ids); do
-    stop_container "$container"
-  done
+  # A graceful stop (SIGINT, the image's stop signal) releases the worker's sticky queue.
+  remove_run_containers 30 || status=1
   stop_all
+  release_memory_run_lock
   if [ "$status" -ne 0 ]; then
     log "run $RUN_NAME failed with status $status; logs in $OUT_DIR"
   fi
@@ -175,43 +148,49 @@ write_parameters() {
     echo "wf_task_slots=$WF_TASK_SLOTS activity_slots=$ACTIVITY_SLOTS"
     echo "returning=$RETURNING rate=$RATE follow_ups=$FOLLOW_UPS think_seconds=$THINK_SECONDS seed=$SEED"
     echo "conversations=$CONVERSATIONS exchanges=$EXCHANGES message_bytes=$MESSAGE_BYTES fill_concurrency=$FILL_CONCURRENCY"
+    echo "baseline_seconds=$BASELINE_SECONDS cooldown_seconds=$COOLDOWN_SECONDS max_rush_seconds=$MAX_RUSH_SECONDS"
     echo "fill_worker: memory=6g cpus=4 cache_size=$((FILL_CONCURRENCY + 100))"
     echo "temporal_cli: $(temporal --version 2>&1 | head -1)"
-    echo "temporalio: $(docker run --rm "$IMAGE" python -c 'import importlib.metadata as m; print(m.version("temporalio"))')"
-    echo "worker_python: $(docker run --rm "$IMAGE" python -c 'import sys; print(sys.version.split()[0])')"
+    echo "temporalio: $(run_probe_container "$IMAGE" python -c 'import importlib.metadata as m; print(m.version("temporalio"))')"
+    echo "worker_python: $(run_probe_container "$IMAGE" python -c 'import sys; print(sys.version.split()[0])')"
     echo "docker_server: $(docker version --format '{{.Server.Version}}' 2>/dev/null)"
+    echo "docker_backend: $(docker info --format '{{.OperatingSystem}}' 2>/dev/null)"
   } | tee "$OUT_DIR/parameters.txt"
 }
 
 run_all() {
+  require_commands uv docker lsof temporal
   if [ -e "$OUT_DIR" ]; then
     log "ERROR: $OUT_DIR exists; choose another RUN_NAME"
     exit 1
   fi
-  mkdir -p "$OUT_DIR"
+  acquire_memory_run_lock
   trap 'on_exit $?' EXIT
   trap 'exit 143' INT TERM
-  ( sleep "$MAX_RUN_SECONDS"; echo "run exceeded MAX_RUN_SECONDS=$MAX_RUN_SECONDS; stopping" >&2; kill -TERM $$ ) &
-  WATCHDOG_PID="$!"
-  # No job notice when cleanup stops the watchdog.
-  disown "$WATCHDOG_PID"
+  mkdir -p "$OUT_DIR"
+  start_watchdog "$MAX_RUN_SECONDS"
   require_free_port "$METRICS_PORT" METRICS_PORT
   log "run $RUN_NAME (run ID $RUN_ID), output $OUT_DIR"
   uv sync --locked --quiet --project "$TEMPORAL_APP_DIR"
   docker build -q -t "$IMAGE" -f "$REPO_ROOT/bench/temporal/Dockerfile" "$TEMPORAL_APP_DIR" >/dev/null
   write_parameters
   start_temporal_server "$OUT_DIR/server.log" fresh
+  require_host_reachable_from_container "$IMAGE" "$TEMPORAL_GRPC_PORT"
 
   # The fill worker caches every active conversation, so no fill message makes it reload history.
   start_worker_container "$FILL_CONTAINER" 6g 4 $((FILL_CONCURRENCY + 100)) ""
+  local fill_container_id
+  fill_container_id="$(last_run_container_id)"
   log "fill: N=$CONVERSATIONS M=$EXCHANGES B=$MESSAGE_BYTES concurrency=$FILL_CONCURRENCY"
   run_step "$OUT_DIR/fill-driver.log" driver fill --manifest "$MANIFEST" \
     --latency-csv "$OUT_DIR/fill-latency.csv" --prefix "$PREFIX" \
     --conversations "$CONVERSATIONS" --exchanges "$EXCHANGES" \
     --message-bytes "$MESSAGE_BYTES" --concurrency "$FILL_CONCURRENCY"
-  stop_container "$FILL_CONTAINER"
+  stop_run_container "$fill_container_id" 30
 
   start_worker_container "$WORKER_CONTAINER" "$MEM_LIMIT" "$CPUS" "$CACHE_SIZE" "$METRICS_PORT"
+  local worker_container_id
+  worker_container_id="$(last_run_container_id)"
   "$PYTHON" "$REPO_ROOT/bench/shared/docker_sampler.py" --container "$WORKER_CONTAINER" \
     --out "$OUT_DIR/stats.csv" --events-out "$OUT_DIR/events.jsonl" \
     --metrics-url "http://127.0.0.1:$METRICS_PORT/metrics" \
@@ -229,21 +208,19 @@ run_all() {
   sleep "$COOLDOWN_SECONDS"
   stop_sampler
   docker logs "$WORKER_CONTAINER" >"$OUT_DIR/worker.log" 2>&1 || true
-  stop_container "$WORKER_CONTAINER"
+  stop_run_container "$worker_container_id" 30
   "$PYTHON" "$REPO_ROOT/bench/shared/summarize.py" --name "$RUN_NAME" \
     --stats "$OUT_DIR/stats.csv" --events "$OUT_DIR/events.jsonl" \
     --latency "$OUT_DIR/rush-latency.csv" --json-out "$OUT_DIR/summary.json" \
     --planned-messages $((RETURNING * FOLLOW_UPS)) | tee "$OUT_DIR/summary.md"
-}
-
-cleanup_leftovers() {
-  for container in $(docker ps -aq --filter "label=$RUN_LABEL"); do
-    stop_container "$container"
-  done
+  "$PYTHON" "$REPO_ROOT/bench/shared/fill_summary.py" \
+    --fill-latency "$OUT_DIR/fill-latency.csv" --fill-log "$OUT_DIR/fill-driver.log" \
+    --rush-log "$OUT_DIR/driver.log" --conversations "$CONVERSATIONS" \
+    --exchanges "$EXCHANGES" | tee "$OUT_DIR/fill-summary.txt"
 }
 
 case "${1:-run}" in
   run) run_all ;;
-  cleanup) cleanup_leftovers ;;
-  *) sed -n '2,25p' "$0"; exit 2 ;;
+  cleanup) cleanup_run_containers "${2:-}" ;;
+  *) sed -n '2,24p' "$0"; exit 2 ;;
 esac
