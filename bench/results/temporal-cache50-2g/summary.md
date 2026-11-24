@@ -1,0 +1,28 @@
+### temporal-cache50-2g
+
+| Measure | Value |
+| --- | --- |
+| peak_working_set_mib | 581.6 |
+| peak_raw_usage_mib | 594.2 |
+| limit_mib | 2048.0 |
+| oom_kills | 0 |
+| oom_seconds_after_rush_start | [] |
+| exit_codes | [] |
+| restarts | 0 |
+| samples | 307 |
+| samples_not_running | 0 |
+| seconds_working_set_at_95pct_of_limit | 0 |
+| rush_messages_planned | 3000 |
+| rush_messages_posted | 3000 |
+| rush_messages_answered | 3000 |
+| rush_messages_posted_without_reply | 0 |
+| cpu_mean_percent_during_rush | 36.3 |
+| cpu_peak_percent | 50.4 |
+| temporal_sticky_cache_size max | 50.0 |
+| temporal_sticky_cache_hit total | 3020.0 |
+| temporal_sticky_cache_miss total | 1980.0 |
+| temporal_sticky_cache_total_forced_eviction total | 2930.0 |
+
+| Phase | Messages | Errors | p50 ms | p95 ms | p99 ms | max ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| rush | 3000 | 0 | 99 | 102 | 150 | 200 |

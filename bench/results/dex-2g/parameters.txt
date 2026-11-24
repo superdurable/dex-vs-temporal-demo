@@ -1,0 +1,9 @@
+run=dex-2g engine=dex memory=2g cpus=2
+worker_task_slots=32 blob_cache_bytes=1073741824
+returning=1000 rate=4 follow_ups=3 think_seconds=10 seed=1
+conversations=1200 exchanges=40 message_bytes=8192 fill_concurrency=200
+fill_worker: memory=4g cpus=4 task_slots=64
+dexcli: dexcli v1.47.20
+dex-python-sdk: 1.45.17
+worker_python: 3.13.18
+docker_server: 29.4.0

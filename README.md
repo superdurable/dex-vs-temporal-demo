@@ -36,6 +36,7 @@ The demos use 30 seconds in place of 10 minutes.
 | `temporal/` | Python workflows, activities, Worker, and the `drive.py` command line |
 | `dex/` | Python Flow, Worker, and the `drive.py` command line |
 | `scripts/temporal/`, `scripts/dex/` | One script per demo |
+| `bench/` | The Worker memory benchmark: load driver, sampler, adapters, Worker images, and published results |
 
 Both `drive.py` tools take the same commands: `start`, `post`, `assign`, `page`, `status`, `flood`.
 
@@ -147,6 +148,53 @@ Dex transcript budget (`d7-transcript-budget.sh`, Dex only):
 ### 4. The Flow design
 
 `scripts/dex/d-design.sh` renders the Flow definition from the source with `dexcli visualize` and opens it in Dex Web.
+
+### 5. Worker memory
+
+Many idle conversations come back at once. The Worker runs in a Docker container with a memory limit. The server and the load driver run on the host, outside the container.
+
+| Script | What it shows |
+| --- | --- |
+| `scripts/temporal/t3-memory.sh` | The correct workflow, Worker in a container |
+| `scripts/dex/d3-memory.sh` | The Dex Flow, Worker in a container |
+
+Load, the same for both:
+
+- Fill: 1,200 conversations, each with 40 exchanges of an 8 KiB customer message and an 8 KiB mock reply. A separate fill Worker does the fill and is then stopped, so no Worker holds a conversation.
+- Rush: a fresh Worker container starts. 1,000 of the conversations come back at 4 per second. Each sends 3 follow-up messages, each 10 s after the previous reply. A conversation whose message gets no reply within 300 s sends no further messages.
+- Worker container: `--memory 512m --memory-swap 512m --cpus 2 --restart on-failure`. Control runs use `2g`.
+- Temporal Worker: 100 workflow task slots, 100 activity slots, sticky cache `max_cached_workflows` as listed. Dex Worker: 32 task slots, 1 GiB on-disk BlobCache.
+- Each run starts its own server and fills its own conversations. The Temporal dev server keeps its data in memory. After the Dex fill, the Dex server data took 48.7 GB and 51.1 GB of disk in the two Dex runs; each reply rewrites the growing transcript chunk.
+
+Versions: the table above for the CLIs and servers. Worker containers: Python 3.14.10 with `temporalio` 1.36.1, and Python 3.13.18 with `dex-python-sdk` 1.45.17. Docker Engine 29.4.0.
+
+The memory figure is the container's working set: memory usage minus inactive file cache, as `docker stats` shows it. The Dex Worker's raw cgroup usage also counts the page cache of its BlobCache files; the published `stats.csv` has both columns.
+
+| Run | Worker memory peak (working set) | OOM kills (exit code) | Seconds at the limit | Follow-ups posted | Posted without a reply | Reply latency p50 / p99 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Temporal, default cache (1,000), 512 MB | 512.0 MiB | 1 (137) | 583 | 1,757 of 3,000 | 715 | 100 ms / 250,186 ms |
+| Temporal, cache 50, 512 MB | 511.8 MiB | 2 (137, 137) | 831 | 2,130 of 3,000 | 637 | 100 ms / 269,715 ms |
+| Dex, 512 MB | 85.5 MiB | 0 | 0 | 3,000 of 3,000 | 0 | 332 ms / 2,254 ms |
+| Temporal, cache 50, 2 GB | 581.6 MiB | 0 | 0 | 3,000 of 3,000 | 0 | 99 ms / 150 ms |
+| Dex, 2 GB | 79.8 MiB | 0 | 0 | 3,000 of 3,000 | 0 | 343 ms / 2,199 ms |
+
+- Seconds at the limit: one-second samples with the working set at 95% of the limit or more.
+- Posted without a reply: no reply within 300 s, or a failed call (2 and 3 of them in the two Temporal 512 MB runs). The conversation then sent no further messages, so fewer than 3,000 follow-ups were posted.
+- Temporal, default cache: the OOM kill came 330 s after the rush started. The restarted Worker answered none of the 135 messages posted after it.
+- Temporal, cache 50: OOM kills 344.5 s and 609.7 s after the rush started.
+- Dex, 512 MB: max latency 2,734 ms. Peak raw cgroup usage 479.9 MiB; the file cache peaked at 424.3 MiB.
+- Dex, 2 GB: max latency 2,647 ms. Peak raw cgroup usage 516.7 MiB; the file cache peaked at 464.6 MiB.
+
+The data of each run is under `bench/results/<run>/`: `parameters.txt`, the per-second samples `stats.csv`, the Docker events `events.jsonl`, one row per message in `rush-latency.csv`, `summary.md` and `summary.json`, and for Dex `server-data-size.txt`. `bench/README.md` describes the harness and every measure.
+
+Reproduce one run (the published runs took 9 to 22 minutes each; the Dex fill needs more than 80 GB free disk):
+
+```bash
+RUN_NAME=temporal-default-cache-512m scripts/temporal/t3-memory.sh
+RUN_NAME=dex-512m scripts/dex/d3-memory.sh
+```
+
+Each script starts its own server, builds the Worker image, fills, runs the rush, prints the summary, and stops and removes what it started. `d3-memory.sh` deletes the server data after the summary. `CACHE_SIZE=50` and `MEM_LIMIT=2g` select the control runs.
 
 ## Load driver rules
 

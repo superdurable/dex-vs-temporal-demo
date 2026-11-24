@@ -1,0 +1,9 @@
+run=temporal-cache50-512m engine=temporal cache_size=50 memory=512m cpus=2
+wf_task_slots=100 activity_slots=100
+returning=1000 rate=4 follow_ups=3 think_seconds=10 seed=1
+conversations=1200 exchanges=40 message_bytes=8192 fill_concurrency=200
+fill_worker: memory=6g cpus=4 cache_size=300
+temporal_cli: temporal version 1.9.1 (Server 1.32.0, UI 2.54.1)
+temporalio: 1.36.1
+worker_python: 3.14.10
+docker_server: 29.4.0
