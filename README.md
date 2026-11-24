@@ -2,6 +2,21 @@
 
 The same small application written twice: once on [Temporal](https://temporal.io) and once on [Dex](https://docs.superdurable.io). Every number in this file comes from a script in this repository. Run the scripts to check them.
 
+## Video
+
+[![Dex vs Temporal, Ep. 1: one idle timer, three production problems](https://img.youtube.com/vi/fzl88JWt734/maxresdefault.jpg)](https://youtu.be/fzl88JWt734)
+
+[Dex vs Temporal, Ep. 1: one idle timer, three production problems](https://youtu.be/fzl88JWt734) walks through this repository. Each part of the video uses these demos:
+
+| Video | Demo in this file | Scripts |
+| --- | --- | --- |
+| [3:55](https://youtu.be/fzl88JWt734?t=235) The natural way in Temporal, a real run, and why | 1. The idle timer | `scripts/temporal/t1-naive-timer.sh` |
+| [8:06](https://youtu.be/fzl88JWt734?t=486) The correct way in Temporal | 1. The idle timer | `scripts/temporal/t1-naive-timer.sh` |
+| [9:28](https://youtu.be/fzl88JWt734?t=568) The Dex way | 1. The idle timer | `scripts/dex/d1-timer.sh` |
+| [10:54](https://youtu.be/fzl88JWt734?t=654) Changing the code | 2. Changing code while conversations are open | `scripts/temporal/t2-change-code.sh`, `scripts/temporal/t2-patch-fix.sh`, `scripts/dex/d2-change-code.sh` |
+| [15:02](https://youtu.be/fzl88JWt734?t=902) The history limit and Continue-As-New | 3. A conversation that keeps going | `scripts/temporal/t5-flood.sh`, `scripts/temporal/t6-continue-as-new.sh`, `scripts/temporal/t8-context-in-activity.sh`, `scripts/dex/d5-flood-fair.sh`, `scripts/dex/d7-transcript-budget.sh` |
+| [20:24](https://youtu.be/fzl88JWt734?t=1224) The complete code and the Flow design | 4. The Flow design | `scripts/dex/d-design.sh` |
+
 ## The application
 
 An AI support conversation. One workflow (Temporal) or one Flow (Dex) per conversation.
