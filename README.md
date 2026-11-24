@@ -163,7 +163,7 @@ Load, the same for both:
 - Fill: 1,200 conversations, each with 40 exchanges of an 8 KiB customer message and an 8 KiB mock reply. A separate fill Worker does the fill and is then stopped, so no Worker holds a conversation. In every published run, all 1,200 conversations had all 40 exchanges confirmed, with no failed exchange (`fill-summary.txt`).
 - Rush: a fresh Worker container starts. 1,000 of the conversations come back at 4 per second. Each sends 3 follow-up messages, each 10 s after the previous reply was observed. After an attempt with no observed reply, that conversation sends no further messages.
 - Worker container: `--memory 512m --memory-swap 512m --cpus 2 --restart on-failure` (a 512 MiB cap, no swap). The 2 GiB control runs use `2g`.
-- Each run starts its own server and fills its own conversations. The Temporal dev server keeps its data in memory. After the Dex fill, the Dex server data took about 49.9 GB and 52.3 GB of disk in the two Dex runs (`du -sk`: 48.7 and 51.1 million KiB); each reply rewrites the growing transcript chunk.
+- Each run starts its own server and fills its own conversations. The Temporal dev server keeps its data in memory, and the Dex server keeps its data on the host disk.
 - The conversations' idle window is 24 hours in this benchmark, so no nudge or close happens during a run.
 
 Versions: the table above for the CLIs and servers. Worker containers: Python 3.14.10 with `temporalio` 1.36.1, and Python 3.13.18 with `dex-python-sdk` 1.45.17. Docker: OrbStack with Docker Engine 29.4.0, cgroup v2, on macOS.
