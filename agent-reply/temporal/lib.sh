@@ -6,7 +6,6 @@
 #   RUN_DIR                         logs, venv, histories (default /tmp/dex-video/two-step/temporal-reply-run)
 #   TEMPORAL_GRPC_PORT              server gRPC port (default 17233)
 #   TEMPORAL_UI_PORT                server Web UI port (default 18233)
-#   AGENT_REPLY_AUTO_SEND_SECONDS   auto-send timer (scripts default to 10 seconds)
 
 set -euo pipefail
 

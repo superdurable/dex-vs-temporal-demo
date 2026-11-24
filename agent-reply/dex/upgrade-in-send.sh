@@ -10,7 +10,6 @@
 # everything on exit.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 MODE="${1:?usage: upgrade-in-send.sh slow|retry}"
-export AGENT_REPLY_AUTO_SEND_SECONDS="${AGENT_REPLY_AUTO_SEND_SECONDS:-10}"
 case "$MODE" in
   slow) export SEND_REPLY_SECONDS=8 SEND_REPLY_FAILED_ATTEMPTS=0; SWAP_AT_ATTEMPT=1 ;;
   retry) export SEND_REPLY_SECONDS=0 SEND_REPLY_FAILED_ATTEMPTS=3; SWAP_AT_ATTEMPT=2 ;;

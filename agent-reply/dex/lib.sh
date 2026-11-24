@@ -5,7 +5,6 @@
 #   RUN_DIR                         logs, venv, server data (default /tmp/dex-video/two-step/dex-reply-run)
 #   DEX_PORT                        Dex Server gRPC port (default 18911)
 #   WEB_PORT                        Dex Web port (default 18912)
-#   AGENT_REPLY_AUTO_SEND_SECONDS   auto-send timer (scripts default to 10 seconds)
 # dexcli dev also keeps its codec discovery file in its own state directory.
 
 set -euo pipefail

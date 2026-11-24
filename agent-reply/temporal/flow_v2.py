@@ -1,14 +1,16 @@
-import asyncio
 from datetime import timedelta
 
 from temporalio import activity, workflow
-
-from settings import AUTO_SEND_AFTER
 
 
 @activity.defn
 async def draft_reply(ticket: str) -> str:
     return f"draft reply for {ticket}"
+
+
+@activity.defn
+async def notify_reviewer(draft: str) -> str:
+    return f"reviewer notified: {draft}"
 
 
 @activity.defn
@@ -31,15 +33,12 @@ class ReplyWorkflow:
             draft_reply, ticket,
             start_to_close_timeout=timedelta(seconds=10),
         )
-        if workflow.patched("auto-send"):
-            try:
-                await workflow.wait_condition(
-                    lambda: self.approved, timeout=AUTO_SEND_AFTER
-                )
-            except asyncio.TimeoutError:
-                pass
-        else:
-            await workflow.wait_condition(lambda: self.approved)
+        if workflow.patched("notify-reviewer"):
+            await workflow.execute_activity(
+                notify_reviewer, draft,
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+        await workflow.wait_condition(lambda: self.approved)
         return await workflow.execute_activity(
             send_reply, draft,
             start_to_close_timeout=timedelta(seconds=10),

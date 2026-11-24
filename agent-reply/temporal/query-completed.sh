@@ -8,7 +8,6 @@
 # a new v1 worker. Prints the worker logs. Stops everything on exit.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 CODE="${1:?usage: query-completed.sh v2_no_patch|v2}"
-export AGENT_REPLY_AUTO_SEND_SECONDS="${AGENT_REPLY_AUTO_SEND_SECONDS:-10}"
 STAMP="$(date -u +%H%M%S)"
 IDS=("done-a-$STAMP" "done-b-$STAMP" "done-c-$STAMP")
 NEW_ID="done-on-$CODE-$STAMP"

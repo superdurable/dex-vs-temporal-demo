@@ -47,7 +47,8 @@ async def run_worker() -> None:
         task_queue=TASK_QUEUE,
         identity=identity,
         workflows=[flow.ReplyWorkflow],
-        activities=[flow.draft_reply, build_send_reply(flow)],
+        activities=[flow.draft_reply, build_send_reply(flow)]
+        + ([flow.notify_reviewer] if hasattr(flow, "notify_reviewer") else []),
     )
     stop_requested = asyncio.Event()
     loop = asyncio.get_running_loop()

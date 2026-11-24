@@ -4,7 +4,6 @@
 # (describe_flow). Then stops the v2 Worker and reads again with no Worker
 # running. Stops everything on exit.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-export AGENT_REPLY_AUTO_SEND_SECONDS="${AGENT_REPLY_AUTO_SEND_SECONDS:-10}"
 STAMP="$(date -u +%H%M%S)"
 IDS=("done-a-$STAMP" "done-b-$STAMP" "done-c-$STAMP")
 

@@ -1,23 +1,24 @@
 from dex import (
     Channel, Context, Flow, PersistenceSchema, Step, StepDecision,
-    StepList, Timer, Wait, go_to, graceful_complete, rpc,
+    StepList, Wait, go_to, graceful_complete, rpc,
 )
-
-from settings import AUTO_SEND_AFTER
 
 APPROVE = Channel("approve", type(None))
 
 
 class DraftReplyStep(Step[str]):
     def execute(self, context: Context, input: str) -> StepDecision:
-        return go_to(SendReplyStep, f"draft reply for {input}")
+        return go_to(NotifyReviewerStep, f"draft reply for {input}")
+
+
+class NotifyReviewerStep(Step[str]):
+    def execute(self, context: Context, input: str) -> StepDecision:
+        return go_to(SendReplyStep, input)
 
 
 class SendReplyStep(Step[str]):
     def wait_for(self, context: Context, input: str) -> Wait:
-        return Wait.any_of(
-            APPROVE.for_one(), Timer.by_duration(AUTO_SEND_AFTER)
-        )
+        return Wait.until(APPROVE.for_one())
 
     def execute(self, context: Context, input: str) -> StepDecision:
         return graceful_complete(f"sent: {input}")
@@ -26,11 +27,12 @@ class SendReplyStep(Step[str]):
 class ReplyFlow(Flow[str]):
     def __init__(self) -> None:
         self.draft_reply = DraftReplyStep()
+        self.notify_reviewer = NotifyReviewerStep()
         self.send_reply = SendReplyStep()
 
     def get_steps(self) -> StepList[str]:
         return StepList.start_step(self.draft_reply).other_steps(
-            self.send_reply
+            self.notify_reviewer, self.send_reply
         )
 
     def get_persistence_schema(self) -> PersistenceSchema:
