@@ -82,7 +82,7 @@ stop_all() {
 trap stop_all EXIT
 
 # Usage: wait_until_waiting <workflow-id>
-# Returns once deploy_to_canary completed and the next workflow task completed.
+# Returns once draft_reply completed and the next workflow task completed (v1 code).
 wait_until_waiting() {
   local events
   for _ in $(seq 1 40); do
@@ -103,4 +103,55 @@ show_history() {
   temporal workflow show --address "$TEMPORAL_ADDRESS" -w "$1" -o json \
     >"$RUN_DIR/history-$1.json"
   python3 "$APP_DIR/history_summary.py" "$RUN_DIR/history-$1.json"
+}
+
+# --- Checks: each failed check is logged; finish_checks exits 1 if any failed.
+FAILED_CHECKS=0
+
+check_failed() {
+  log "CHECK FAILED: $*"
+  FAILED_CHECKS=$((FAILED_CHECKS + 1))
+}
+
+# Usage: expect_status <workflow-id> COMPLETED|RUNNING
+expect_status() {
+  local status
+  status="$(client status "$1" | sed -E 's/^[^:]+: ([A-Z_]+);.*/\1/')"
+  if [[ "$status" == "$2" ]]; then
+    log "check ok: $1 is $2"
+  else
+    check_failed "$1 is $status, expected $2"
+  fi
+}
+
+# Usage: expect_activities <workflow-id> <activity type>...
+# Compares the scheduled activity types, in order, with the expected list.
+expect_activities() {
+  local workflow_id="$1" activities
+  shift
+  temporal workflow show --address "$TEMPORAL_ADDRESS" -w "$workflow_id" -o json \
+    >"$RUN_DIR/history-$workflow_id.json"
+  activities="$(python3 "$APP_DIR/history_summary.py" --activities "$RUN_DIR/history-$workflow_id.json")"
+  if [[ "$activities" == "$*" ]]; then
+    log "check ok: $workflow_id scheduled $activities"
+  else
+    check_failed "$workflow_id scheduled '$activities', expected '$*'"
+  fi
+}
+
+# Usage: expect_output_contains <description> <text> <output>
+expect_output_contains() {
+  if grep -qF -- "$2" <<<"$3"; then
+    log "check ok: $1"
+  else
+    check_failed "$1: output does not contain '$2': $3"
+  fi
+}
+
+finish_checks() {
+  if [[ "$FAILED_CHECKS" -gt 0 ]]; then
+    log "$FAILED_CHECKS check(s) failed"
+    exit 1
+  fi
+  log "all checks passed"
 }

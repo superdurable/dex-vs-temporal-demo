@@ -4,7 +4,8 @@
 #   old-approve-a, old-approve-b  get approve_reply
 #   old-idle                      gets nothing
 #   new-approve, new-idle         start on v2; one is approved
-# Waits 15 s, then prints each status and history. Stops everything on exit.
+# Waits 15 s, prints each history, and checks each status and Step order;
+# exits 1 on an unexpected result. Stops everything on exit.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 STAMP="$(date -u +%H%M%S)"
 OLD=("old-approve-a-$STAMP" "old-approve-b-$STAMP" "old-idle-$STAMP")
@@ -31,10 +32,6 @@ done
 sleep 2
 client v2 approve "${NEW[0]}"
 sleep 15
-for id in "${OLD[@]}" "${NEW[@]}"; do
-  client v2 result "$id" 1
-  client v2 status "$id"
-done
 
 log "--- histories"
 for id in "${OLD[@]}" "${NEW[@]}"; do
@@ -43,3 +40,14 @@ for id in "${OLD[@]}" "${NEW[@]}"; do
 done
 log "--- v2 Worker log"
 cat "$RUN_DIR/worker-v2.log"
+
+log "--- checks"
+for id in "${OLD[0]}" "${OLD[1]}"; do
+  expect_status "$id" COMPLETED
+  expect_steps "$id" DraftReplyStep SendReplyStep
+done
+expect_status "${OLD[2]}" RUNNING
+expect_status "${NEW[0]}" COMPLETED
+expect_steps "${NEW[0]}" DraftReplyStep NotifyReviewerStep SendReplyStep
+expect_status "${NEW[1]}" RUNNING
+finish_checks

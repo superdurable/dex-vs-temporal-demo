@@ -109,3 +109,54 @@ show_history() {
     -server "$DEX_SERVER_ADDRESS" -timeout 60s >"$RUN_DIR/history-$1.jsonl"
   python3 "$APP_DIR/history_summary.py" "$RUN_DIR/history-$1.jsonl"
 }
+
+# --- Checks: each failed check is logged; finish_checks exits 1 if any failed.
+FAILED_CHECKS=0
+
+check_failed() {
+  log "CHECK FAILED: $*"
+  FAILED_CHECKS=$((FAILED_CHECKS + 1))
+}
+
+# Usage: expect_status <flow-id> COMPLETED|RUNNING
+expect_status() {
+  local status
+  status="$(client v2 status "$1" | sed -E 's/^[^:]+: ([A-Z_]+)$/\1/')"
+  if [[ "$status" == "$2" ]]; then
+    log "check ok: $1 is $2"
+  else
+    check_failed "$1 is $status, expected $2"
+  fi
+}
+
+# Usage: expect_steps <flow-id> <Step type>...
+# Compares the completed Step executions, in order, with the expected list.
+expect_steps() {
+  local flow_id="$1" steps
+  shift
+  dexcli flow history "$flow_id" -all -no-hydrate -page-size 1000 \
+    -server "$DEX_SERVER_ADDRESS" -timeout 60s >"$RUN_DIR/history-$flow_id.jsonl"
+  steps="$(python3 "$APP_DIR/history_summary.py" --steps "$RUN_DIR/history-$flow_id.jsonl")"
+  if [[ "$steps" == "$*" ]]; then
+    log "check ok: $flow_id completed $steps"
+  else
+    check_failed "$flow_id completed '$steps', expected '$*'"
+  fi
+}
+
+# Usage: expect_output_contains <description> <text> <output>
+expect_output_contains() {
+  if grep -qF -- "$2" <<<"$3"; then
+    log "check ok: $1"
+  else
+    check_failed "$1: output does not contain '$2': $3"
+  fi
+}
+
+finish_checks() {
+  if [[ "$FAILED_CHECKS" -gt 0 ]]; then
+    log "$FAILED_CHECKS check(s) failed"
+    exit 1
+  fi
+  log "all checks passed"
+}

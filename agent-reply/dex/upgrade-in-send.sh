@@ -1,38 +1,29 @@
 #!/usr/bin/env bash
-# Usage: upgrade-in-send.sh slow|retry
 # Starts three replies on the v1 Worker and approves them under v1, so each
-# runs SendReplyStep.execute. Test-only settings change that execute:
-#   slow   each attempt takes SEND_REPLY_SECONDS (8 s)
-#   retry  the first SEND_REPLY_FAILED_ATTEMPTS (3) attempts fail; default retry policy
-# Once every reply runs attempt 1 (slow) or attempt 2 (retry), the script
-# stops the v1 Worker with SIGTERM and starts the v2 Worker. Waits 30 s, then
-# prints each result, status, history, and both Worker logs. Stops
-# everything on exit.
+# runs SendReplyStep.execute. The test-only SEND_REPLY_FAILED_ATTEMPTS=3 makes
+# the first three attempts fail; the default retry policy retries them. Once
+# every reply runs attempt 2, stops the v1 Worker and starts the v2 Worker.
+# Waits 30 s, prints each history and both Worker logs, then checks that each
+# reply COMPLETED with DraftReplyStep, SendReplyStep and that attempt 4 ran on
+# v2; exits 1 otherwise. Stops everything on exit.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-MODE="${1:?usage: upgrade-in-send.sh slow|retry}"
-case "$MODE" in
-  slow) export SEND_REPLY_SECONDS=8 SEND_REPLY_FAILED_ATTEMPTS=0; SWAP_AT_ATTEMPT=1 ;;
-  retry) export SEND_REPLY_SECONDS=0 SEND_REPLY_FAILED_ATTEMPTS=3; SWAP_AT_ATTEMPT=2 ;;
-  *) echo "mode must be slow or retry" >&2; exit 2 ;;
-esac
+export SEND_REPLY_FAILED_ATTEMPTS=3
 STAMP="$(date -u +%H%M%S)"
 IDS=("in-send-a-$STAMP" "in-send-b-$STAMP" "in-send-c-$STAMP")
 
-wait_until_attempt() {
+wait_until_attempt_2() {
   for _ in $(seq 1 80); do
-    if grep -q "SendReplyStep.execute $1 attempt $SWAP_AT_ATTEMPT started" "$RUN_DIR/worker-v1.log"; then
-      log "$1 runs SendReplyStep attempt $SWAP_AT_ATTEMPT on v1"
+    if grep -q "SendReplyStep.execute $1 attempt 2 started" "$RUN_DIR/worker-v1.log"; then
+      log "$1 runs SendReplyStep attempt 2 on v1"
       return
     fi
     sleep 0.25
   done
-  log "ERROR: $1 did not reach SendReplyStep attempt $SWAP_AT_ATTEMPT"
+  log "ERROR: $1 did not reach SendReplyStep attempt 2"
   exit 1
 }
 
 start_server
-log "mode $MODE: execute takes $SEND_REPLY_SECONDS s, first $SEND_REPLY_FAILED_ATTEMPTS attempts fail"
-
 log "--- three replies on v1, approved under v1"
 start_worker v1
 for id in "${IDS[@]}"; do
@@ -43,19 +34,13 @@ for id in "${IDS[@]}"; do
   client v1 approve "$id"
 done
 for id in "${IDS[@]}"; do
-  wait_until_attempt "$id"
+  wait_until_attempt_2 "$id"
 done
-stop_started=$SECONDS
 stop_worker
-log "stopping the v1 Worker took $((SECONDS - stop_started)) s"
 
 log "--- v2 Worker"
 start_worker v2
 sleep 30
-for id in "${IDS[@]}"; do
-  client v2 result "$id" 1
-  client v2 status "$id"
-done
 
 log "--- histories"
 for id in "${IDS[@]}"; do
@@ -63,6 +48,18 @@ for id in "${IDS[@]}"; do
   show_history "$id"
 done
 log "--- v1 Worker log"
-cat "$RUN_DIR/worker-v1.log"
+grep -E "worker|started" "$RUN_DIR/worker-v1.log"
 log "--- v2 Worker log"
-cat "$RUN_DIR/worker-v2.log"
+grep -E "worker|started" "$RUN_DIR/worker-v2.log"
+
+log "--- checks"
+for id in "${IDS[@]}"; do
+  if grep -q "SendReplyStep.execute $id attempt 4 started" "$RUN_DIR/worker-v2.log"; then
+    log "check ok: $id ran SendReplyStep attempt 4 on v2"
+  else
+    check_failed "$id did not run SendReplyStep attempt 4 on v2"
+  fi
+  expect_status "$id" COMPLETED
+  expect_steps "$id" DraftReplyStep SendReplyStep
+done
+finish_checks

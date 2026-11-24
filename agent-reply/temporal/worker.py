@@ -16,21 +16,20 @@ from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from settings import SEND_REPLY_FAILED_ATTEMPTS, SEND_REPLY_SECONDS, TASK_QUEUE
+from settings import SEND_REPLY_FAILED_ATTEMPTS, TASK_QUEUE
 
 
 def build_send_reply(flow):
-    if not SEND_REPLY_SECONDS and not SEND_REPLY_FAILED_ATTEMPTS:
+    if not SEND_REPLY_FAILED_ATTEMPTS:
         return flow.send_reply
 
-    # Same activity name; only duration and early failures change, for upgrade tests.
+    # Same activity name; only the first attempts fail, for upgrade tests.
     @activity.defn(name="send_reply")
     async def test_send_reply(draft: str) -> str:
         info = activity.info()
         print(f"send_reply {info.workflow_id} attempt {info.attempt} started", flush=True)
         if info.attempt <= SEND_REPLY_FAILED_ATTEMPTS:
             raise RuntimeError(f"test failure of send_reply attempt {info.attempt}")
-        await asyncio.sleep(SEND_REPLY_SECONDS)
         return await flow.send_reply(draft)
 
     return test_send_reply

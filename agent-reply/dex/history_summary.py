@@ -1,15 +1,18 @@
-"""Print one line per event of a saved `dexcli flow history -all -no-hydrate` file.
+"""Summarize a saved `dexcli flow history -all -no-hydrate` file.
 
-Usage: history_summary.py <history.jsonl>
-Each line shows the event ID, time, type, Step, the Worker that ran it, and
-what a WaitFor waits on.
+Usage: history_summary.py <history.jsonl>           one line per event
+       history_summary.py --steps <history.jsonl>   completed Step executions, in order
+Event lines show the event ID, time, type, Step, the Worker that ran it, and
+the Channels a WaitFor waits on.
 """
 
 import json
 import sys
 
 
-def read_events(text: str) -> list[dict]:
+def read_events(path: str) -> list[dict]:
+    with open(path, encoding="utf-8") as history_file:
+        text = history_file.read()
     events: list[dict] = []
     decoder = json.JSONDecoder()
     position = 0
@@ -32,9 +35,8 @@ def describe(event: dict) -> str:
         detail = ""
         wait = output.get("waitForCondition")
         if wait:
-            timers = [t.get("durationSeconds") for t in wait.get("timerConditions", [])]
             channels = [c["channelName"] for c in wait.get("channelConditions", [])]
-            detail = f"waits for timers {timers} s, channels {channels}"
+            detail = f"waits for channels {channels}"
         next_steps = [
             step["stepType"]
             for step in output.get("stepDecision", {}).get("nextSteps", [])
@@ -47,12 +49,22 @@ def describe(event: dict) -> str:
     return json.dumps(payload, sort_keys=True)[:160]
 
 
-def main(path: str) -> None:
-    with open(path, encoding="utf-8") as history_file:
-        events = read_events(history_file.read())
-    for event in events:
+def print_events(path: str) -> None:
+    for event in read_events(path):
         print(f'{event["eventId"]:>4} {event["eventTime"]} {event["type"]:<28} {describe(event)}')
 
 
+def print_steps(path: str) -> None:
+    steps = [
+        event["payload"]["context"]["stepType"]
+        for event in read_events(path)
+        if event["type"] == "StepExecuteCompleted"
+    ]
+    print(" ".join(steps))
+
+
 if __name__ == "__main__":
-    main(sys.argv[1])
+    if sys.argv[1] == "--steps":
+        print_steps(sys.argv[2])
+    else:
+        print_events(sys.argv[1])
