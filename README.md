@@ -195,7 +195,7 @@ What is and is not the same:
 
 The data of each run is under `bench/results/<run>/`: `parameters.txt`, the per-second samples `stats.csv`, the Docker container lifecycle events `events.jsonl` (including `oom`, `die`, and `start`), one row per follow-up attempt in `rush-latency.csv`, the fill counts and phase wall-clock times in `fill-summary.txt`, `summary.md` and `summary.json`, and for Dex `server-data-size.txt`. [`bench/README.md`](bench/README.md) describes the harness, every measure, and its known limits.
 
-Requirements: macOS with OrbStack or Docker Desktop, whose `host.docker.internal` reaches the host loopback; `uv`, `lsof`, the `docker` CLI, and `temporal` or `dexcli`; for the Dex run more than 80 GB (10^9 bytes) of free disk. Native Linux Docker is untested; both scripts check from a container that the server is reachable and stop with an error otherwise.
+Requirements: macOS with OrbStack, which the published runs used, or another Docker backend whose `host.docker.internal` reaches the host loopback, such as Docker Desktop (not tested); `uv`, `lsof`, the `docker` CLI, and `temporal` or `dexcli`; for the Dex run more than 80 GB (10^9 bytes) of free disk. Native Linux Docker is untested; both scripts check from a container that the server is reachable and stop with an error otherwise.
 
 Reproduce one run (fill wall-clock: about 200 s for Temporal and 920 to 950 s for Dex; rush: 270 to 943 s; see `fill-summary.txt`):
 

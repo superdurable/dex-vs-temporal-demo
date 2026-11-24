@@ -29,7 +29,8 @@ and the raw data is under `results/`.
 
 - macOS with a Docker backend that forwards `host.docker.internal` to the
   host loopback. The published runs used OrbStack (Docker Engine 29.4.0,
-  cgroup v2) on macOS 26. Docker Desktop also provides this name.
+  cgroup v2) on macOS 26. Docker Desktop provides the same name; it was
+  not tested.
 - Native Linux Docker is untested. A container there does not reach the
   host loopback through `host.docker.internal` by default. Both scripts
   check this from a container after the server starts and stop with an
