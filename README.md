@@ -155,46 +155,56 @@ Many idle conversations come back at once. The Worker runs in a Docker container
 
 | Script | What it shows |
 | --- | --- |
-| `scripts/temporal/t3-memory.sh` | The correct workflow, Worker in a container |
+| `scripts/temporal/t3-memory.sh` | Temporal `ConversationWorkflow` v1, Worker in a container |
 | `scripts/dex/d3-memory.sh` | The Dex Flow, Worker in a container |
 
 Load, the same for both:
 
-- Fill: 1,200 conversations, each with 40 exchanges of an 8 KiB customer message and an 8 KiB mock reply. A separate fill Worker does the fill and is then stopped, so no Worker holds a conversation.
-- Rush: a fresh Worker container starts. 1,000 of the conversations come back at 4 per second. Each sends 3 follow-up messages, each 10 s after the previous reply. A conversation whose message gets no reply within 300 s sends no further messages.
-- Worker container: `--memory 512m --memory-swap 512m --cpus 2 --restart on-failure`. Control runs use `2g`.
-- Temporal Worker: 100 workflow task slots, 100 activity slots, sticky cache `max_cached_workflows` as listed. Dex Worker: 32 task slots, 1 GiB on-disk BlobCache.
-- Each run starts its own server and fills its own conversations. The Temporal dev server keeps its data in memory. After the Dex fill, the Dex server data took 48.7 GB and 51.1 GB of disk in the two Dex runs; each reply rewrites the growing transcript chunk.
+- Fill: 1,200 conversations, each with 40 exchanges of an 8 KiB customer message and an 8 KiB mock reply. A separate fill Worker does the fill and is then stopped, so no Worker holds a conversation. In every published run, all 1,200 conversations had all 40 exchanges confirmed, with no failed exchange (`fill-summary.txt`).
+- Rush: a fresh Worker container starts. 1,000 of the conversations come back at 4 per second. Each sends 3 follow-up messages, each 10 s after the previous reply was observed. After an attempt with no observed reply, that conversation sends no further messages.
+- Worker container: `--memory 512m --memory-swap 512m --cpus 2 --restart on-failure` (a 512 MiB cap, no swap). The 2 GiB control runs use `2g`.
+- Each run starts its own server and fills its own conversations. The Temporal dev server keeps its data in memory. After the Dex fill, the Dex server data took about 49.9 GB and 52.3 GB of disk in the two Dex runs (`du -sk`: 48.7 and 51.1 million KiB); each reply rewrites the growing transcript chunk.
+- The conversations' idle window is 24 hours in this benchmark, so no nudge or close happens during a run.
 
-Versions: the table above for the CLIs and servers. Worker containers: Python 3.14.10 with `temporalio` 1.36.1, and Python 3.13.18 with `dex-python-sdk` 1.45.17. Docker Engine 29.4.0.
+Versions: the table above for the CLIs and servers. Worker containers: Python 3.14.10 with `temporalio` 1.36.1, and Python 3.13.18 with `dex-python-sdk` 1.45.17. Docker: OrbStack with Docker Engine 29.4.0, cgroup v2, on macOS.
 
-The memory figure is the container's working set: memory usage minus inactive file cache, as `docker stats` shows it. The Dex Worker's raw cgroup usage also counts the page cache of its BlobCache files; the published `stats.csv` has both columns.
+The memory figure is the container's working set: memory usage minus inactive file memory, as `docker stats` shows it on cgroup v2. The Docker memory cap applies to the raw cgroup usage, which `stats.csv` also records; the raw usage and the working set are different observations.
 
-| Run | Worker memory peak (working set) | OOM kills (exit code) | Seconds at the limit | Follow-ups posted | Posted without a reply | Reply latency p50 / p99 |
+| Run | Worker memory peak (working set) | OOM kills (exit code) | Samples (1 per second) with the working set at ≥95% of the cap | Follow-up attempts | Attempts with no observed reply | Reply latency p50 / p99 (observed replies only) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Temporal, default cache (1,000), 512 MB | 512.0 MiB | 1 (137) | 583 | 1,757 of 3,000 | 715 | 100 ms / 250,186 ms |
-| Temporal, cache 50, 512 MB | 511.8 MiB | 2 (137, 137) | 831 | 2,130 of 3,000 | 637 | 100 ms / 269,715 ms |
-| Dex, 512 MB | 85.5 MiB | 0 | 0 | 3,000 of 3,000 | 0 | 332 ms / 2,254 ms |
-| Temporal, cache 50, 2 GB | 581.6 MiB | 0 | 0 | 3,000 of 3,000 | 0 | 99 ms / 150 ms |
-| Dex, 2 GB | 79.8 MiB | 0 | 0 | 3,000 of 3,000 | 0 | 343 ms / 2,199 ms |
+| Temporal, default cache (1,000), 512 MiB | 512.0 MiB | 1 (137) | 583 | 1,757 of 3,000 planned | 715 | 100 ms / 250,186 ms |
+| Dex, 512 MiB | 85.5 MiB | 0 | 0 | 3,000 of 3,000 planned | 0 | 332 ms / 2,254 ms |
+| Control: Temporal, cache 50, 512 MiB | 511.8 MiB | 2 (137, 137) | 831 | 2,130 of 3,000 planned | 637 | 100 ms / 269,715 ms |
+| Control: Temporal, cache 50, 2 GiB | 581.6 MiB | 0 | 0 | 3,000 of 3,000 planned | 0 | 99 ms / 150 ms |
+| Control: Dex, 2 GiB | 79.8 MiB | 0 | 0 | 3,000 of 3,000 planned | 0 | 343 ms / 2,199 ms |
 
-- Seconds at the limit: one-second samples with the working set at 95% of the limit or more.
-- Posted without a reply: no reply within 300 s, or a failed call (2 and 3 of them in the two Temporal 512 MB runs). The conversation then sent no further messages, so fewer than 3,000 follow-ups were posted.
-- Temporal, default cache: the OOM kill came 330 s after the rush started. The restarted Worker answered none of the 135 messages posted after it.
-- Temporal, cache 50: OOM kills 344.5 s and 609.7 s after the rush started.
-- Dex, 512 MB: max latency 2,734 ms. Peak raw cgroup usage 479.9 MiB; the file cache peaked at 424.3 MiB.
-- Dex, 2 GB: max latency 2,647 ms. Peak raw cgroup usage 516.7 MiB; the file cache peaked at 464.6 MiB.
+- Attempts with no observed reply: the send call failed, waiting for the reply failed, or no reply was observed within 300 s. The 300 s start when the send call returns. In `rush-latency.csv` of the two Temporal 512 MiB runs, 713 and 634 of these attempts end with `TimeoutError`, and 2 and 3 with `RPCError: operation was canceled`.
+- Reply latency is the driver-observed round trip of the attempts with an observed reply. It excludes the attempts with no observed reply.
+- Temporal, default cache: Docker restarted the Worker after one OOM kill at 330 s. The driver observed 169 replies to earlier attempts in the first 7.5 s after restart, and none to the 135 attempts started after restart. The sampled working set remained at or above 95% of the cap from about 5 s after restart through the end of sampling.
+- Control, Temporal, cache 50, 512 MiB: OOM kills 344.5 s and 609.7 s after the rush started.
+- Dex, 512 MiB: max latency 2,734 ms. Peak raw cgroup usage 479.9 MiB; the cgroup file memory peaked at 424.3 MiB.
+- Control, Dex, 2 GiB: max latency 2,647 ms. Peak raw cgroup usage 516.7 MiB; the cgroup file memory peaked at 464.6 MiB.
 
-The data of each run is under `bench/results/<run>/`: `parameters.txt`, the per-second samples `stats.csv`, the Docker events `events.jsonl`, one row per message in `rush-latency.csv`, `summary.md` and `summary.json`, and for Dex `server-data-size.txt`. `bench/README.md` describes the harness and every measure.
+What is and is not the same:
 
-Reproduce one run (the published runs took 9 to 22 minutes each; the Dex fill needs more than 80 GB free disk):
+- The same: the planned conversations and the seed-1 choice of the 1,000 that come back, 8,192-byte messages and mock replies, the arrival rate and think time, and the Worker container's CPU and memory caps.
+- Worker settings: Temporal uses the SDK defaults of 100 workflow task slots and 100 activity slots, with the sticky cache `max_cached_workflows` at 1,000 (the SDK default) or 50, as labelled. Dex uses 32 task slots and a 1 GiB on-disk BlobCache.
+- The servers and the load driver run outside the measured container, so their memory is not in these figures.
+- Each configuration was run once.
+- Reply latency is measured by the load driver. The Temporal adapter long-polls the workflow history until the workflow task after the reply activity completes. The Dex adapter waits for the `GenerateReplyStep` execution with the Client's Step-completion wait, then reads one Attribute.
+
+The data of each run is under `bench/results/<run>/`: `parameters.txt`, the per-second samples `stats.csv`, the Docker container lifecycle events `events.jsonl` (including `oom`, `die`, and `start`), one row per follow-up attempt in `rush-latency.csv`, the fill counts and phase wall-clock times in `fill-summary.txt`, `summary.md` and `summary.json`, and for Dex `server-data-size.txt`. [`bench/README.md`](bench/README.md) describes the harness, every measure, and its known limits.
+
+Requirements: macOS with OrbStack or Docker Desktop, whose `host.docker.internal` reaches the host loopback; `uv`, `lsof`, the `docker` CLI, and `temporal` or `dexcli`; for the Dex run more than 80 GB (10^9 bytes) of free disk. Native Linux Docker is untested; both scripts check from a container that the server is reachable and stop with an error otherwise.
+
+Reproduce one run (fill wall-clock: about 200 s for Temporal and 920 to 950 s for Dex; rush: 270 to 943 s; see `fill-summary.txt`):
 
 ```bash
 RUN_NAME=temporal-default-cache-512m scripts/temporal/t3-memory.sh
 RUN_NAME=dex-512m scripts/dex/d3-memory.sh
 ```
 
-Each script starts its own server, builds the Worker image, fills, runs the rush, prints the summary, and stops and removes what it started. `d3-memory.sh` deletes the server data after the summary. `CACHE_SIZE=50` and `MEM_LIMIT=2g` select the control runs.
+Each script starts its own server, builds the Worker image, fills, runs the rush, prints the summary, and stops and removes what it started. Only one memory run runs at a time. `d3-memory.sh` deletes the server data it created after the summary. `CACHE_SIZE=50` and `MEM_LIMIT=2g` select the control runs.
 
 ## Load driver rules
 

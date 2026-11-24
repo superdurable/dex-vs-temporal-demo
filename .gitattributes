@@ -1,0 +1,2 @@
+# Published benchmark data keeps LF line endings.
+bench/results/**/*.csv text eol=lf

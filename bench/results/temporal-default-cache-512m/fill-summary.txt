@@ -1,0 +1,9 @@
+conversations_planned=1200
+exchanges_per_conversation_planned=40
+conversations_with_all_exchanges_confirmed=1200
+min_confirmed_exchanges_per_conversation=40
+max_confirmed_exchanges_per_conversation=40
+fill_exchanges_with_observed_reply=48000
+fill_exchanges_failed=0
+fill_wall_clock_seconds=202.9
+rush_wall_clock_seconds=647.7

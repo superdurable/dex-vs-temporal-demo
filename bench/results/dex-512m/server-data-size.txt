@@ -1,1 +1,2 @@
-[02:52:28] server data after the fill: 48.7 GB
+server data after the fill (du -sk): 48.7 million KiB, rounded to 0.1 million; about 49.9 GB (10^9 bytes)
+The run's log printed this value as "48.7 GB": that script version divided KiB by 10^6.
