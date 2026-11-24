@@ -5,6 +5,7 @@ No Dex resources here: the Flow reads and writes them, these helpers compute val
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Protocol
@@ -24,7 +25,11 @@ MAX_VALUE_BYTES = 16 * 1024 * 1024
 MAX_DROPPED_CHUNKS_PER_EXECUTION = 2
 
 MAX_MESSAGE_CHARACTERS = 8192
-MAX_REPLY_CHARACTERS = 2000
+# DEMO_REPLY_BYTES: mock reply size of the memory benchmark; unset keeps 200.
+DEMO_REPLY_BYTES = int(os.environ.get("DEMO_REPLY_BYTES", "") or 0)
+# Raised to the benchmark's reply size so long mock replies are stored whole.
+MAX_REPLY_CHARACTERS = max(2000, DEMO_REPLY_BYTES)
+assert MAX_REPLY_CHARACTERS <= MAX_MESSAGE_CHARACTERS
 MAX_TOOL_CALLS = 8
 MAX_TOOL_CALL_CHARACTERS = 64
 MAX_AGENT_NAME_CHARACTERS = 200

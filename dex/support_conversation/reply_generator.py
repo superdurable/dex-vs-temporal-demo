@@ -6,7 +6,9 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Protocol
 
-REPLY_BYTES = 200
+from support_conversation.transcript import DEMO_REPLY_BYTES
+
+REPLY_BYTES = DEMO_REPLY_BYTES or 200
 
 
 @dataclass(frozen=True)
@@ -46,4 +48,7 @@ class MockReplyGenerator:
             f"{' and '.join(tool_calls)}. Your request is covered. "
             "Is there anything else I can help with today?"
         )
+        if DEMO_REPLY_BYTES:
+            # The memory benchmark fills the reply to exactly DEMO_REPLY_BYTES.
+            text = (text + " ") * (DEMO_REPLY_BYTES // (len(text) + 1) + 1)
         return GeneratedReply(text[:REPLY_BYTES], tool_calls)

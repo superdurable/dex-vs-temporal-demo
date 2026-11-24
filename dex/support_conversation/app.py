@@ -19,7 +19,8 @@ from support_conversation.transcript import LocalTranscriptSummarizer, ReplyRequ
 
 DEFAULT_SERVER_ADDRESS = "127.0.0.1:18801"
 DEFAULT_RUN_DIRECTORY = "/tmp/dex-video/dex-run"
-BLOB_CACHE_BYTES = 1 << 30
+# DEMO_BLOB_CACHE_BYTES overrides the on-disk BlobCache limit; unset keeps 1 GiB.
+BLOB_CACHE_BYTES = int(os.environ.get("DEMO_BLOB_CACHE_BYTES", "") or 1 << 30)
 
 # SUPPORT_FLOW_VERSION selects which Flow code this process runs; v1 is the default.
 FLOW_VERSION_ENVIRONMENT_VARIABLE = "SUPPORT_FLOW_VERSION"
