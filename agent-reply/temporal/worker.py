@@ -8,13 +8,32 @@ workflow task.
 
 import asyncio
 import importlib
+import logging
 import os
 import signal
 
+from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from settings import TASK_QUEUE
+from settings import SEND_REPLY_FAILED_ATTEMPTS, SEND_REPLY_SECONDS, TASK_QUEUE
+
+
+def build_send_reply(flow):
+    if not SEND_REPLY_SECONDS and not SEND_REPLY_FAILED_ATTEMPTS:
+        return flow.send_reply
+
+    # Same activity name; only duration and early failures change, for upgrade tests.
+    @activity.defn(name="send_reply")
+    async def test_send_reply(draft: str) -> str:
+        info = activity.info()
+        print(f"send_reply {info.workflow_id} attempt {info.attempt} started", flush=True)
+        if info.attempt <= SEND_REPLY_FAILED_ATTEMPTS:
+            raise RuntimeError(f"test failure of send_reply attempt {info.attempt}")
+        await asyncio.sleep(SEND_REPLY_SECONDS)
+        return await flow.send_reply(draft)
+
+    return test_send_reply
 
 
 async def run_worker() -> None:
@@ -28,7 +47,7 @@ async def run_worker() -> None:
         task_queue=TASK_QUEUE,
         identity=identity,
         workflows=[flow.ReplyWorkflow],
-        activities=[flow.draft_reply, flow.send_reply],
+        activities=[flow.draft_reply, build_send_reply(flow)],
     )
     stop_requested = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -41,4 +60,6 @@ async def run_worker() -> None:
 
 
 if __name__ == "__main__":
+    # Shows workflow task failures, such as non-determinism errors, in the worker log.
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     asyncio.run(run_worker())
