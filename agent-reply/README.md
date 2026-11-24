@@ -74,14 +74,6 @@ Temporal, v2 without `workflow.patched` (`upgrade.sh v2_no_patch`):
 
 No workflow task failed. The v2 worker logged no error. `replay_check.py` replays every saved old history against `flow_v2_no_patch.py` with no error.
 
-A history that v2 changed can no longer run on v1 code. `replay_check.py` with `flow_v1.py` fails on the reply that got the unhandled signal:
-
-```text
-[TMPRL1100] Nondeterminism error: No command scheduled for event HistoryEvent(id: 15, TimerStarted)
-```
-
-It fails the same way on the new replies started on v2 (event 11).
-
 Temporal, v2 with `workflow.patched("auto-send")` (`upgrade.sh v2`):
 
 | Reply | What happened |
