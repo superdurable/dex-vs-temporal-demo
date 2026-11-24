@@ -17,7 +17,8 @@ from temporalio import activity
 
 from conversation_shared import GeneratedReply, OutboxRequest, ReplyRequest
 
-REPLY_BYTES = 200
+# DEMO_REPLY_BYTES sets the mock reply size of the memory benchmark; unset keeps 200.
+REPLY_BYTES = int(os.environ.get("DEMO_REPLY_BYTES", "") or 200)
 TOOL_CALLS_BY_KEYWORD = (
     ("order", "lookup_order"),
     ("refund", "check_refund_policy"),
@@ -62,7 +63,8 @@ def build_mock_reply(
         "support specialist will follow up shortly. Is there anything else "
         "I can help you with today? "
     )
-    return GeneratedReply((reply * 2)[:REPLY_BYTES], tool_calls)
+    repeat_count = REPLY_BYTES // len(reply) + 2
+    return GeneratedReply((reply * repeat_count)[:REPLY_BYTES], tool_calls)
 
 
 @activity.defn

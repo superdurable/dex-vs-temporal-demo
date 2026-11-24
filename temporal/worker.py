@@ -11,6 +11,14 @@ The naive, Continue-As-New inline transcript, and context-in-activity
 (ConversationWithContextWorkflow) variants are always registered.
 Set DEMO_WORKER_PID_FILE to have the worker write its process ID there, so
 scripts can stop exactly this process. SIGINT or SIGTERM stops it.
+
+Optional memory benchmark switches (unset means unchanged behavior):
+  DEMO_WORKER_IDENTITY                 worker identity (default conversation-demo-worker-<code>)
+  DEMO_MAX_CACHED_WORKFLOWS            sticky cache size in workflows (SDK default 1000)
+  DEMO_MAX_CONCURRENT_WORKFLOW_TASKS   workflow task slots
+  DEMO_MAX_CONCURRENT_ACTIVITIES       activity task slots
+  DEMO_METRICS_BIND                    Prometheus bind address, for example 0.0.0.0:9464
+  DEMO_REPLY_BYTES                     mock reply size (default 200)
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ import os
 import signal
 
 from temporalio.client import Client
+from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
 from activities import (
@@ -46,6 +55,32 @@ CONVERSATION_MODULE_BY_CODE = {
 }
 
 
+def optional_int_from_environment(name: str) -> int | None:
+    value = os.environ.get(name, "")
+    return int(value) if value else None
+
+
+def build_worker_options() -> dict[str, int]:
+    options: dict[str, int] = {}
+    for option, variable in (
+        ("max_cached_workflows", "DEMO_MAX_CACHED_WORKFLOWS"),
+        ("max_concurrent_workflow_tasks", "DEMO_MAX_CONCURRENT_WORKFLOW_TASKS"),
+        ("max_concurrent_activities", "DEMO_MAX_CONCURRENT_ACTIVITIES"),
+    ):
+        value = optional_int_from_environment(variable)
+        if value is not None:
+            options[option] = value
+    return options
+
+
+def build_runtime(metrics_bind: str) -> Runtime | None:
+    if not metrics_bind:
+        return None
+    return Runtime(
+        telemetry=TelemetryConfig(metrics=PrometheusConfig(bind_address=metrics_bind))
+    )
+
+
 async def run_worker() -> None:
     address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
     code_version = os.environ.get("DEMO_CONVERSATION_CODE", "v1")
@@ -53,10 +88,17 @@ async def run_worker() -> None:
         CONVERSATION_MODULE_BY_CODE[code_version]
     )
     # A fixed identity keeps the host name out of recorded histories.
-    identity = f"conversation-demo-worker-{code_version}"
-    client = await Client.connect(
-        address, identity=identity, data_converter=build_data_converter()
+    identity = os.environ.get(
+        "DEMO_WORKER_IDENTITY", f"conversation-demo-worker-{code_version}"
     )
+    metrics_bind = os.environ.get("DEMO_METRICS_BIND", "")
+    client = await Client.connect(
+        address,
+        identity=identity,
+        data_converter=build_data_converter(),
+        runtime=build_runtime(metrics_bind),
+    )
+    worker_options = build_worker_options()
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
@@ -74,6 +116,7 @@ async def run_worker() -> None:
             send_nudge_email,
             post_close_summary,
         ],
+        **worker_options,
     )
     stop_requested = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -81,11 +124,14 @@ async def run_worker() -> None:
         loop.add_signal_handler(stop_signal, stop_requested.set)
     async with worker:
         logging.info(
-            "worker polling task queue %s on %s with ConversationWorkflow code %s (%s.py)",
+            "worker polling task queue %s on %s with ConversationWorkflow code %s (%s.py) "
+            "options=%s metrics=%s",
             TASK_QUEUE,
             address,
             code_version,
             conversation_module.__name__,
+            worker_options,
+            metrics_bind or "off",
         )
         await stop_requested.wait()
     logging.info("worker stopped")
